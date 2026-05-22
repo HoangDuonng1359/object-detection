@@ -1,0 +1,2 @@
+epoch,lr,train_loss,train_box_loss,train_objectness_loss,train_class_loss,train_num_positive,val_loss,val_box_loss,val_objectness_loss,val_class_loss,val_num_positive,val_map50,best_map50
+1,0.0006666666666666666,6.3288140296936035,0.7962533235549927,1.2281689643859863,2.2387571334838867,1.0,3.7334301471710205,0.35882776975631714,1.1345555782318115,1.609471321105957,2.0,0.0,0.0
