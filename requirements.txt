@@ -1,1 +1,7 @@
+torch
+torchvision
+numpy
+pillow
 tqdm
+pandas
+ipykernel

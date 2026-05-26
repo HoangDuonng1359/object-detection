@@ -15,7 +15,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from tqdm.auto import tqdm
 
-from models.yolo import DEFAULT_CLASSES, build_model
+from models.yolo import DEFAULT_ANCHOR_BASE_SIZE, DEFAULT_ANCHORS, DEFAULT_CLASSES, build_model
 from utils.dataset import make_dataloader
 from utils.loss import YoloDetectionLoss
 
@@ -446,6 +446,8 @@ def save_checkpoint(
         "epoch": epoch,
         "classes": list(DEFAULT_CLASSES),
         "anchors": [scale.detach().cpu().tolist() for scale in model.anchors],
+        "base_anchors": DEFAULT_ANCHORS,
+        "anchor_base_size": DEFAULT_ANCHOR_BASE_SIZE,
         "strides": list(model.strides),
         "image_size": args.image_size,
         "best_map": best_map,
@@ -578,6 +580,7 @@ def main() -> None:
         num_classes=len(DEFAULT_CLASSES),
         pretrained_backbone=args.pretrained_backbone,
         freeze_backbone_stem=args.freeze_backbone_stem,
+        image_size=args.image_size,
     ).to(device)
     criterion = YoloDetectionLoss(
         anchors=model.anchors,

@@ -8,7 +8,14 @@ from typing import Any
 import torch
 from PIL import Image
 
-from models.yolo import DEFAULT_ANCHORS, DEFAULT_CLASSES, DEFAULT_STRIDES, YoloLite
+from models.yolo import (
+    DEFAULT_ANCHOR_BASE_SIZE,
+    DEFAULT_ANCHORS,
+    DEFAULT_CLASSES,
+    DEFAULT_STRIDES,
+    YoloLite,
+    scale_anchors,
+)
 from utils.augmentation import image_to_normalized_tensor, letterbox_resize
 from utils.loss import YoloDetectionLoss
 
@@ -50,9 +57,16 @@ def load_model(
 
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     classes = list(checkpoint.get("classes", DEFAULT_CLASSES))
-    anchors = to_anchor_tuple(checkpoint.get("anchors", DEFAULT_ANCHORS))
     strides = tuple(int(stride) for stride in checkpoint.get("strides", DEFAULT_STRIDES))
     image_size = int(checkpoint.get("image_size", 416))
+    if "anchors" in checkpoint:
+        anchors = to_anchor_tuple(checkpoint["anchors"])
+    else:
+        anchors = scale_anchors(
+            DEFAULT_ANCHORS,
+            image_size=image_size,
+            base_size=int(checkpoint.get("anchor_base_size", DEFAULT_ANCHOR_BASE_SIZE)),
+        )
 
     model = YoloLite(
         num_classes=len(classes),
