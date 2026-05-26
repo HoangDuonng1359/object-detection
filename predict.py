@@ -8,14 +8,7 @@ from typing import Any
 import torch
 from PIL import Image
 
-from models.yolo import (
-    DEFAULT_ANCHOR_BASE_SIZE,
-    DEFAULT_ANCHORS,
-    DEFAULT_CLASSES,
-    DEFAULT_STRIDES,
-    YoloLite,
-    scale_anchors,
-)
+from models.yolo import DEFAULT_CLASSES, DEFAULT_STRIDES, YoloLite
 from utils.augmentation import image_to_normalized_tensor, letterbox_resize
 from utils.loss import YoloDetectionLoss
 
@@ -44,10 +37,6 @@ def choose_device(name: str) -> torch.device:
     return torch.device(name)
 
 
-def to_anchor_tuple(value: Any) -> tuple[tuple[tuple[float, float], ...], ...]:
-    return tuple(tuple((float(w), float(h)) for w, h in scale) for scale in value)
-
-
 def load_model(
     checkpoint_path: Path,
     device: torch.device,
@@ -59,19 +48,10 @@ def load_model(
     classes = list(checkpoint.get("classes", DEFAULT_CLASSES))
     strides = tuple(int(stride) for stride in checkpoint.get("strides", DEFAULT_STRIDES))
     image_size = int(checkpoint.get("image_size", 416))
-    if "anchors" in checkpoint:
-        anchors = to_anchor_tuple(checkpoint["anchors"])
-    else:
-        anchors = scale_anchors(
-            DEFAULT_ANCHORS,
-            image_size=image_size,
-            base_size=int(checkpoint.get("anchor_base_size", DEFAULT_ANCHOR_BASE_SIZE)),
-        )
 
     model = YoloLite(
         num_classes=len(classes),
         pretrained_backbone=False,
-        anchors=anchors,
         strides=strides,
     ).to(device)
     state = checkpoint.get("model_state", checkpoint)
@@ -159,13 +139,12 @@ def decode_predictions(
     for scale_index, prediction in enumerate(predictions):
         decoded = criterion.decode_boxes(
             prediction,
-            criterion.anchors[scale_index],
             criterion.strides[scale_index],
         )
-        boxes = decoded.permute(0, 1, 3, 4, 2).reshape(batch_size, -1, 4)
-        objectness = torch.sigmoid(prediction[:, :, 4]).reshape(batch_size, -1)
-        class_probs = torch.softmax(prediction[:, :, 5:], dim=2)
-        class_scores, class_labels = class_probs.permute(0, 1, 3, 4, 2).reshape(
+        boxes = decoded.permute(0, 2, 3, 1).reshape(batch_size, -1, 4)
+        objectness = torch.sigmoid(prediction[:, 4]).reshape(batch_size, -1)
+        class_probs = torch.softmax(prediction[:, 5:], dim=1)
+        class_scores, class_labels = class_probs.permute(0, 2, 3, 1).reshape(
             batch_size,
             -1,
             criterion.num_classes,
@@ -263,7 +242,6 @@ def predict(args: argparse.Namespace) -> list[dict[str, Any]]:
     device = choose_device(args.device)
     model, classes, image_size = load_model(args.checkpoint, device)
     criterion = YoloDetectionLoss(
-        anchors=model.anchors,
         strides=model.strides,
         num_classes=len(classes),
     ).to(device)

@@ -22,24 +22,6 @@ def xyxy_to_cxcywh(boxes: torch.Tensor) -> torch.Tensor:
     )
 
 
-def cxcywh_to_xyxy(boxes: torch.Tensor) -> torch.Tensor:
-    cx, cy, width, height = boxes.unbind(dim=-1)
-    half_w = width * 0.5
-    half_h = height * 0.5
-    return torch.stack(
-        (cx - half_w, cy - half_h, cx + half_w, cy + half_h),
-        dim=-1,
-    )
-
-
-def box_wh_iou(box_wh: torch.Tensor, anchor_wh: torch.Tensor) -> torch.Tensor:
-    box_wh = box_wh[:, None, :]
-    anchor_wh = anchor_wh[None, :, :]
-    intersection = torch.minimum(box_wh, anchor_wh).prod(dim=-1)
-    union = box_wh.prod(dim=-1) + anchor_wh.prod(dim=-1) - intersection
-    return intersection / union.clamp(min=1e-6)
-
-
 def bbox_ciou(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
     x1 = torch.maximum(boxes1[:, 0], boxes2[:, 0])
     y1 = torch.maximum(boxes1[:, 1], boxes2[:, 1])
@@ -74,7 +56,6 @@ def bbox_ciou(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
     height1 = (boxes1[:, 3] - boxes1[:, 1]).clamp(min=1e-6)
     width2 = (boxes2[:, 2] - boxes2[:, 0]).clamp(min=1e-6)
     height2 = (boxes2[:, 3] - boxes2[:, 1]).clamp(min=1e-6)
-
     v = (4.0 / math.pi**2) * (
         torch.atan(width2 / height2) - torch.atan(width1 / height1)
     ).pow(2)
@@ -108,7 +89,6 @@ class LossTargets:
 class YoloDetectionLoss(nn.Module):
     def __init__(
         self,
-        anchors: tuple[torch.Tensor | tuple[tuple[float, float], ...], ...],
         strides: tuple[int, ...],
         num_classes: int = 5,
         box_weight: float = 5.0,
@@ -116,11 +96,11 @@ class YoloDetectionLoss(nn.Module):
         class_weight: float = 0.5,
         focal_alpha: float = 0.25,
         focal_gamma: float = 2.0,
+        center_radius: int = 1,
+        small_object_max_side: float = 64.0,
+        medium_object_max_side: float = 160.0,
     ) -> None:
         super().__init__()
-        if len(anchors) != len(strides):
-            raise ValueError("anchors and strides must have the same number of scales")
-
         self.num_classes = num_classes
         self.strides = tuple(int(stride) for stride in strides)
         self.box_weight = box_weight
@@ -128,42 +108,33 @@ class YoloDetectionLoss(nn.Module):
         self.class_weight = class_weight
         self.focal_alpha = focal_alpha
         self.focal_gamma = focal_gamma
+        self.center_radius = center_radius
+        self.small_object_max_side = small_object_max_side
+        self.medium_object_max_side = medium_object_max_side
 
-        for index, scale_anchors in enumerate(anchors):
-            anchor_tensor = torch.as_tensor(scale_anchors, dtype=torch.float32)
-            if anchor_tensor.ndim != 2 or anchor_tensor.shape[1] != 2:
-                raise ValueError("each anchor scale must have shape [A, 2]")
-            self.register_buffer(f"anchors_{index}", anchor_tensor)
+    def choose_scale(self, width: torch.Tensor, height: torch.Tensor) -> int:
+        max_side = float(torch.maximum(width, height).item())
+        if max_side <= self.small_object_max_side:
+            return 0
+        if max_side <= self.medium_object_max_side:
+            return min(1, len(self.strides) - 1)
+        return len(self.strides) - 1
 
-    @property
-    def anchors(self) -> tuple[torch.Tensor, ...]:
-        return tuple(
-            getattr(self, f"anchors_{index}") for index in range(len(self.strides))
-        )
-
-    def decode_boxes(
-        self,
-        prediction: torch.Tensor,
-        anchors: torch.Tensor,
-        stride: int,
-    ) -> torch.Tensor:
-        _, num_anchors, _, height, width = prediction.shape
+    def decode_boxes(self, prediction: torch.Tensor, stride: int) -> torch.Tensor:
+        _, _, height, width = prediction.shape
         device = prediction.device
-
         grid_y, grid_x = torch.meshgrid(
             torch.arange(height, device=device),
             torch.arange(width, device=device),
             indexing="ij",
         )
-        grid_x = grid_x.view(1, 1, height, width).float()
-        grid_y = grid_y.view(1, 1, height, width).float()
-        anchors = anchors.to(device).view(1, num_anchors, 2, 1, 1)
+        grid_x = grid_x.view(1, height, width).float()
+        grid_y = grid_y.view(1, height, width).float()
 
-        center_x = (torch.sigmoid(prediction[:, :, 0]) + grid_x) * stride
-        center_y = (torch.sigmoid(prediction[:, :, 1]) + grid_y) * stride
-        box_w = prediction[:, :, 2].clamp(min=-10.0, max=10.0).exp() * anchors[:, :, 0]
-        box_h = prediction[:, :, 3].clamp(min=-10.0, max=10.0).exp() * anchors[:, :, 1]
-
+        center_x = (torch.sigmoid(prediction[:, 0]) + grid_x) * stride
+        center_y = (torch.sigmoid(prediction[:, 1]) + grid_y) * stride
+        box_w = prediction[:, 2].clamp(min=-6.0, max=6.0).exp() * stride
+        box_h = prediction[:, 3].clamp(min=-6.0, max=6.0).exp() * stride
         return torch.stack(
             (
                 center_x - box_w * 0.5,
@@ -171,7 +142,7 @@ class YoloDetectionLoss(nn.Module):
                 center_x + box_w * 0.5,
                 center_y + box_h * 0.5,
             ),
-            dim=2,
+            dim=1,
         )
 
     def build_targets(
@@ -187,38 +158,21 @@ class YoloDetectionLoss(nn.Module):
         area_targets: list[torch.Tensor] = []
 
         for prediction in predictions:
-            batch_size, num_anchors, _, height, width = prediction.shape
-            objectness_targets.append(
-                torch.zeros(batch_size, num_anchors, height, width, device=device)
-            )
-            box_targets.append(
-                torch.zeros(batch_size, num_anchors, 4, height, width, device=device)
-            )
+            batch_size, _, height, width = prediction.shape
+            objectness_targets.append(torch.zeros(batch_size, height, width, device=device))
+            box_targets.append(torch.zeros(batch_size, 4, height, width, device=device))
             class_targets.append(
                 torch.full(
-                    (batch_size, num_anchors, height, width),
+                    (batch_size, height, width),
                     -1,
                     dtype=torch.long,
                     device=device,
                 )
             )
             positive_masks.append(
-                torch.zeros(
-                    batch_size,
-                    num_anchors,
-                    height,
-                    width,
-                    dtype=torch.bool,
-                    device=device,
-                )
+                torch.zeros(batch_size, height, width, dtype=torch.bool, device=device)
             )
-            area_targets.append(
-                torch.zeros(batch_size, num_anchors, height, width, device=device)
-            )
-
-        anchors = tuple(anchor.to(device) for anchor in self.anchors)
-        all_anchors = torch.cat(anchors, dim=0)
-        num_anchors = anchors[0].shape[0]
+            area_targets.append(torch.full((batch_size, height, width), float("inf"), device=device))
 
         for batch_index, target in enumerate(targets):
             boxes = target["boxes"].to(device=device, dtype=torch.float32)
@@ -227,65 +181,36 @@ class YoloDetectionLoss(nn.Module):
                 continue
 
             cxcywh = xyxy_to_cxcywh(boxes)
-            anchor_ious = box_wh_iou(cxcywh[:, 2:4], all_anchors)
-            best_anchor_indices = anchor_ious.argmax(dim=1)
-
-            for box_index, best_anchor_index in enumerate(best_anchor_indices):
-                scale_index = int(best_anchor_index.item() // num_anchors)
-                anchor_index = int(best_anchor_index.item() % num_anchors)
+            for box_index, (cx, cy, box_w, box_h) in enumerate(cxcywh):
+                scale_index = self.choose_scale(box_w, box_h)
                 stride = self.strides[scale_index]
-                _, _, grid_h, grid_w = objectness_targets[scale_index].shape
-
-                cx, cy, box_w, box_h = cxcywh[box_index]
-                grid_x = int(torch.clamp((cx / stride).floor(), 0, grid_w - 1).item())
-                grid_y = int(torch.clamp((cy / stride).floor(), 0, grid_h - 1).item())
+                _, grid_h, grid_w = objectness_targets[scale_index].shape
+                center_x = int(torch.clamp((cx / stride).floor(), 0, grid_w - 1).item())
+                center_y = int(torch.clamp((cy / stride).floor(), 0, grid_h - 1).item())
                 area = box_w * box_h
 
-                current_area = area_targets[scale_index][
-                    batch_index,
-                    anchor_index,
-                    grid_y,
-                    grid_x,
-                ]
-                if positive_masks[scale_index][
-                    batch_index,
-                    anchor_index,
-                    grid_y,
-                    grid_x,
-                ] and current_area >= area:
-                    continue
+                for offset_y in range(-self.center_radius, self.center_radius + 1):
+                    for offset_x in range(-self.center_radius, self.center_radius + 1):
+                        grid_x = center_x + offset_x
+                        grid_y = center_y + offset_y
+                        if grid_x < 0 or grid_x >= grid_w or grid_y < 0 or grid_y >= grid_h:
+                            continue
 
-                objectness_targets[scale_index][
-                    batch_index,
-                    anchor_index,
-                    grid_y,
-                    grid_x,
-                ] = 1.0
-                box_targets[scale_index][
-                    batch_index,
-                    anchor_index,
-                    :,
-                    grid_y,
-                    grid_x,
-                ] = boxes[box_index]
-                class_targets[scale_index][
-                    batch_index,
-                    anchor_index,
-                    grid_y,
-                    grid_x,
-                ] = labels[box_index]
-                positive_masks[scale_index][
-                    batch_index,
-                    anchor_index,
-                    grid_y,
-                    grid_x,
-                ] = True
-                area_targets[scale_index][
-                    batch_index,
-                    anchor_index,
-                    grid_y,
-                    grid_x,
-                ] = area
+                        point_x = (grid_x + 0.5) * stride
+                        point_y = (grid_y + 0.5) * stride
+                        x1, y1, x2, y2 = boxes[box_index]
+                        if point_x < x1 or point_x > x2 or point_y < y1 or point_y > y2:
+                            continue
+
+                        current_area = area_targets[scale_index][batch_index, grid_y, grid_x]
+                        if current_area <= area:
+                            continue
+
+                        objectness_targets[scale_index][batch_index, grid_y, grid_x] = 1.0
+                        box_targets[scale_index][batch_index, :, grid_y, grid_x] = boxes[box_index]
+                        class_targets[scale_index][batch_index, grid_y, grid_x] = labels[box_index]
+                        positive_masks[scale_index][batch_index, grid_y, grid_x] = True
+                        area_targets[scale_index][batch_index, grid_y, grid_x] = area
 
         return LossTargets(
             objectness=objectness_targets,
@@ -301,14 +226,13 @@ class YoloDetectionLoss(nn.Module):
     ) -> dict[str, torch.Tensor]:
         loss_targets = self.build_targets(predictions, targets)
         device = predictions[0].device
-
         objectness_loss_sum = torch.zeros((), device=device)
         box_loss_sum = torch.zeros((), device=device)
         class_loss_sum = torch.zeros((), device=device)
         positive_count = torch.zeros((), device=device)
 
         for scale_index, prediction in enumerate(predictions):
-            objectness_logits = prediction[:, :, 4]
+            objectness_logits = prediction[:, 4]
             objectness_targets = loss_targets.objectness[scale_index]
             objectness_loss_sum = objectness_loss_sum + focal_bce_with_logits(
                 objectness_logits,
@@ -323,18 +247,12 @@ class YoloDetectionLoss(nn.Module):
             if num_positive == 0:
                 continue
 
-            decoded_boxes = self.decode_boxes(
-                prediction,
-                self.anchors[scale_index],
-                self.strides[scale_index],
-            )
-            predicted_boxes = decoded_boxes.permute(0, 1, 3, 4, 2)[positive_mask]
-            target_boxes = loss_targets.boxes[scale_index].permute(0, 1, 3, 4, 2)[
-                positive_mask
-            ]
+            decoded_boxes = self.decode_boxes(prediction, self.strides[scale_index])
+            predicted_boxes = decoded_boxes.permute(0, 2, 3, 1)[positive_mask]
+            target_boxes = loss_targets.boxes[scale_index].permute(0, 2, 3, 1)[positive_mask]
             box_loss_sum = box_loss_sum + (1.0 - bbox_ciou(predicted_boxes, target_boxes)).sum()
 
-            class_logits = prediction[:, :, 5:].permute(0, 1, 3, 4, 2)[positive_mask]
+            class_logits = prediction[:, 5:].permute(0, 2, 3, 1)[positive_mask]
             class_targets = loss_targets.classes[scale_index][positive_mask]
             class_loss_sum = class_loss_sum + F.cross_entropy(
                 class_logits,
@@ -351,7 +269,6 @@ class YoloDetectionLoss(nn.Module):
             + self.objectness_weight * objectness_loss
             + self.class_weight * class_loss
         )
-
         return {
             "loss": total_loss,
             "box_loss": box_loss.detach(),

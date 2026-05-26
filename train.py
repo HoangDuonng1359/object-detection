@@ -15,7 +15,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from tqdm.auto import tqdm
 
-from models.yolo import DEFAULT_ANCHOR_BASE_SIZE, DEFAULT_ANCHORS, DEFAULT_CLASSES, build_model
+from models.yolo import DEFAULT_CLASSES, build_model
 from utils.dataset import make_dataloader
 from utils.loss import YoloDetectionLoss
 
@@ -127,13 +127,12 @@ def decode_batch_predictions(
     for scale_index, prediction in enumerate(predictions):
         decoded_boxes = criterion.decode_boxes(
             prediction,
-            criterion.anchors[scale_index],
             criterion.strides[scale_index],
         )
-        boxes = decoded_boxes.permute(0, 1, 3, 4, 2).reshape(batch_size, -1, 4)
-        objectness = torch.sigmoid(prediction[:, :, 4]).reshape(batch_size, -1)
-        class_probs = torch.softmax(prediction[:, :, 5:], dim=2)
-        class_scores, class_labels = class_probs.permute(0, 1, 3, 4, 2).reshape(
+        boxes = decoded_boxes.permute(0, 2, 3, 1).reshape(batch_size, -1, 4)
+        objectness = torch.sigmoid(prediction[:, 4]).reshape(batch_size, -1)
+        class_probs = torch.softmax(prediction[:, 5:], dim=1)
+        class_scores, class_labels = class_probs.permute(0, 2, 3, 1).reshape(
             batch_size,
             -1,
             criterion.num_classes,
@@ -445,9 +444,7 @@ def save_checkpoint(
         "optimizer_state": optimizer.state_dict(),
         "epoch": epoch,
         "classes": list(DEFAULT_CLASSES),
-        "anchors": [scale.detach().cpu().tolist() for scale in model.anchors],
-        "base_anchors": DEFAULT_ANCHORS,
-        "anchor_base_size": DEFAULT_ANCHOR_BASE_SIZE,
+        "architecture": "anchor_free_yolo_lite",
         "strides": list(model.strides),
         "image_size": args.image_size,
         "best_map": best_map,
@@ -583,7 +580,6 @@ def main() -> None:
         image_size=args.image_size,
     ).to(device)
     criterion = YoloDetectionLoss(
-        anchors=model.anchors,
         strides=model.strides,
         num_classes=len(DEFAULT_CLASSES),
     ).to(device)
