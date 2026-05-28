@@ -37,6 +37,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup_epochs", type=int, default=3)
     parser.add_argument("--grad_clip", type=float, default=10.0)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--oversample_classes",
+        nargs="*",
+        default=[],
+        help="Class names whose images should be sampled more often during training.",
+    )
+    parser.add_argument(
+        "--oversample_factor",
+        type=float,
+        default=1.0,
+        help="Sampling weight for images containing oversample_classes. Use 1.0 to disable.",
+    )
 
     parser.add_argument("--pretrained_backbone", action="store_true")
     parser.add_argument("--freeze_backbone_stem", action="store_true")
@@ -479,6 +491,8 @@ def append_history(
         "lr",
         "weight_decay",
         "warmup_epochs",
+        "oversample_classes",
+        "oversample_factor",
         "pretrained_backbone",
         "freeze_backbone_stem",
         "amp",
@@ -518,6 +532,8 @@ def append_history(
         "lr": lr,
         "weight_decay": args.weight_decay,
         "warmup_epochs": args.warmup_epochs,
+        "oversample_classes": " ".join(args.oversample_classes),
+        "oversample_factor": args.oversample_factor,
         "pretrained_backbone": args.pretrained_backbone,
         "freeze_backbone_stem": args.freeze_backbone_stem,
         "amp": args.amp,
@@ -562,6 +578,8 @@ def main() -> None:
         train=True,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
+        oversample_classes=args.oversample_classes,
+        oversample_factor=args.oversample_factor,
     )
     val_loader = make_dataloader(
         annotation_file=args.val_data,

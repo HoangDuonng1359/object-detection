@@ -7,7 +7,7 @@ from typing import Any
 
 import torch
 from PIL import Image
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 from .augmentation import DetectionTransform
 
@@ -106,6 +106,33 @@ def detection_collate_fn(
     return torch.stack(list(images), dim=0), list(targets)
 
 
+def make_class_oversampling_sampler(
+    dataset: ObjectDetectionDataset,
+    oversample_classes: list[str] | tuple[str, ...] | None = None,
+    oversample_factor: float = 1.0,
+) -> WeightedRandomSampler | None:
+    if not oversample_classes or oversample_factor <= 1.0:
+        return None
+
+    unknown_classes = sorted(set(oversample_classes) - set(dataset.classes))
+    if unknown_classes:
+        raise ValueError(f"Unknown oversample classes: {unknown_classes}")
+
+    target_classes = set(oversample_classes)
+    weights = []
+    for image_info in dataset.images:
+        image_id = image_info["id"]
+        annotations = dataset.annotations_by_image.get(image_id, [])
+        has_target_class = any(ann["class"] in target_classes for ann in annotations)
+        weights.append(float(oversample_factor if has_target_class else 1.0))
+
+    return WeightedRandomSampler(
+        weights=torch.as_tensor(weights, dtype=torch.double),
+        num_samples=len(weights),
+        replacement=True,
+    )
+
+
 def make_dataloader(
     annotation_file: str | Path,
     image_dir: str | Path,
@@ -114,6 +141,8 @@ def make_dataloader(
     batch_size: int = 8,
     num_workers: int = 0,
     shuffle: bool | None = None,
+    oversample_classes: list[str] | tuple[str, ...] | None = None,
+    oversample_factor: float = 1.0,
 ) -> DataLoader:
     dataset = ObjectDetectionDataset(
         annotation_file=annotation_file,
@@ -121,10 +150,19 @@ def make_dataloader(
         image_size=image_size,
         train=train,
     )
+    sampler = None
+    if train:
+        sampler = make_class_oversampling_sampler(
+            dataset,
+            oversample_classes=oversample_classes,
+            oversample_factor=oversample_factor,
+        )
+    should_shuffle = train if shuffle is None else shuffle
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=train if shuffle is None else shuffle,
+        shuffle=False if sampler is not None else should_shuffle,
+        sampler=sampler,
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
         collate_fn=detection_collate_fn,

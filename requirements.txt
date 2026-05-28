@@ -5,3 +5,4 @@ pillow
 tqdm
 pandas
 ipykernel
+matplotlib
