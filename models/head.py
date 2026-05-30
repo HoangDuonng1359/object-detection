@@ -8,8 +8,38 @@ from torch import nn
 from .neck import ConvBNAct
 
 
+class DecoupledPredictionHead(nn.Module):
+    """Separate box/objectness and class towers for one feature scale."""
+
+    def __init__(self, in_channels: int, num_classes: int) -> None:
+        super().__init__()
+        self.box_tower = nn.Sequential(
+            ConvBNAct(in_channels, in_channels),
+            ConvBNAct(in_channels, in_channels),
+        )
+        self.class_tower = nn.Sequential(
+            ConvBNAct(in_channels, in_channels),
+            ConvBNAct(in_channels, in_channels),
+        )
+        self.box_pred = nn.Conv2d(in_channels, 4, kernel_size=1)
+        self.objectness_pred = nn.Conv2d(in_channels, 1, kernel_size=1)
+        self.class_pred = nn.Conv2d(in_channels, num_classes, kernel_size=1)
+
+    def forward(self, feature: torch.Tensor) -> torch.Tensor:
+        box_feature = self.box_tower(feature)
+        class_feature = self.class_tower(feature)
+        return torch.cat(
+            [
+                self.box_pred(box_feature),
+                self.objectness_pred(box_feature),
+                self.class_pred(class_feature),
+            ],
+            dim=1,
+        )
+
+
 class DetectionHead(nn.Module):
-    """Anchor-free YOLO-style prediction heads for multiple feature scales."""
+    """Anchor-free decoupled YOLO-style prediction heads."""
 
     def __init__(
         self,
@@ -21,25 +51,15 @@ class DetectionHead(nn.Module):
         self.num_classes = num_classes
         self.num_outputs = 5 + num_classes
         self.heads = nn.ModuleList(
-            self._make_head(in_channels) for _ in range(num_scales)
+            DecoupledPredictionHead(in_channels, num_classes)
+            for _ in range(num_scales)
         )
         self._init_prediction_bias()
 
-    def _make_head(self, in_channels: int) -> nn.Sequential:
-        return nn.Sequential(
-            ConvBNAct(in_channels, in_channels),
-            nn.Conv2d(in_channels, self.num_outputs, kernel_size=1),
-        )
-
     def _init_prediction_bias(self) -> None:
         for head in self.heads:
-            pred = head[-1]
-            if not isinstance(pred, nn.Conv2d) or pred.bias is None:
-                continue
-            bias = pred.bias.detach()
-            bias[4] = math.log(0.01 / 0.99)
-            bias[5:] = math.log(0.01 / 0.99)
-            pred.bias.data.copy_(bias)
+            nn.init.constant_(head.objectness_pred.bias, math.log(0.01 / 0.99))
+            nn.init.constant_(head.class_pred.bias, math.log(0.01 / 0.99))
 
     def forward(self, features: tuple[torch.Tensor, ...]) -> list[torch.Tensor]:
         return [head(feature) for feature, head in zip(features, self.heads)]

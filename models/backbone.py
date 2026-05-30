@@ -2,19 +2,19 @@ from __future__ import annotations
 
 import torch
 from torch import nn
-from torchvision.models import ResNet18_Weights, resnet18
+from torchvision.models import ResNet34_Weights, resnet34
 
 
-class ResNet18Backbone(nn.Module):
-    """ResNet-18 feature extractor returning strides 8, 16, and 32."""
+class ResNet34Backbone(nn.Module):
+    """ResNet-34 feature extractor returning strides 8, 16, and 32."""
 
     out_channels = (128, 256, 512)
     strides = (8, 16, 32)
 
     def __init__(self, pretrained: bool = False, freeze_stem: bool = False) -> None:
         super().__init__()
-        weights = ResNet18_Weights.DEFAULT if pretrained else None
-        model = resnet18(weights=weights)
+        weights = ResNet34_Weights.DEFAULT if pretrained else None
+        model = resnet34(weights=weights)
 
         self.stem = nn.Sequential(
             model.conv1,
