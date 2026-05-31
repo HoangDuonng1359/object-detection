@@ -9,7 +9,7 @@ from .neck import SimpleFPN
 
 
 DEFAULT_CLASSES = ("person", "car", "dog", "cat", "chair")
-DEFAULT_STRIDES = (8, 16, 32)
+DEFAULT_STRIDES = (4, 8, 16, 32)
 
 
 class YoloLite(nn.Module):
@@ -19,7 +19,7 @@ class YoloLite(nn.Module):
         pretrained_backbone: bool = False,
         freeze_backbone_stem: bool = False,
         fpn_channels: int = 256,
-        strides: tuple[int, int, int] = DEFAULT_STRIDES,
+        strides: tuple[int, ...] = DEFAULT_STRIDES,
     ) -> None:
         super().__init__()
         self.num_classes = num_classes

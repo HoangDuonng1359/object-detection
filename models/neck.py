@@ -33,20 +33,25 @@ class ConvBNAct(nn.Module):
 
 
 class SimpleFPN(nn.Module):
-    """Small top-down FPN for ResNet C3/C4/C5 features."""
+    """FPN+PAN neck for ResNet C2/C3/C4/C5 features."""
 
     def __init__(
         self,
-        in_channels: tuple[int, int, int] = (128, 256, 512),
+        in_channels: tuple[int, int, int, int] = (64, 128, 256, 512),
         out_channels: int = 256,
     ) -> None:
         super().__init__()
-        c3_channels, c4_channels, c5_channels = in_channels
+        c2_channels, c3_channels, c4_channels, c5_channels = in_channels
 
+        self.lateral2 = nn.Conv2d(c2_channels, out_channels, kernel_size=1)
         self.lateral3 = nn.Conv2d(c3_channels, out_channels, kernel_size=1)
         self.lateral4 = nn.Conv2d(c4_channels, out_channels, kernel_size=1)
         self.lateral5 = nn.Conv2d(c5_channels, out_channels, kernel_size=1)
 
+        self.smooth2 = nn.Sequential(
+            ConvBNAct(out_channels, out_channels),
+            ConvBNAct(out_channels, out_channels),
+        )
         self.smooth3 = nn.Sequential(
             ConvBNAct(out_channels, out_channels),
             ConvBNAct(out_channels, out_channels),
@@ -59,12 +64,27 @@ class SimpleFPN(nn.Module):
             ConvBNAct(out_channels, out_channels),
             ConvBNAct(out_channels, out_channels),
         )
+        self.down2 = ConvBNAct(out_channels, out_channels, stride=2)
+        self.pan3 = nn.Sequential(
+            ConvBNAct(out_channels, out_channels),
+            ConvBNAct(out_channels, out_channels),
+        )
+        self.down3 = ConvBNAct(out_channels, out_channels, stride=2)
+        self.pan4 = nn.Sequential(
+            ConvBNAct(out_channels, out_channels),
+            ConvBNAct(out_channels, out_channels),
+        )
+        self.down4 = ConvBNAct(out_channels, out_channels, stride=2)
+        self.pan5 = nn.Sequential(
+            ConvBNAct(out_channels, out_channels),
+            ConvBNAct(out_channels, out_channels),
+        )
 
     def forward(
         self,
-        features: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        c3, c4, c5 = features
+        features: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        c2, c3, c4, c5 = features
 
         p5 = self.lateral5(c5)
         p4 = self.lateral4(c4) + F.interpolate(
@@ -77,5 +97,20 @@ class SimpleFPN(nn.Module):
             size=c3.shape[-2:],
             mode="nearest",
         )
+        p2 = self.lateral2(c2) + F.interpolate(
+            p3,
+            size=c2.shape[-2:],
+            mode="nearest",
+        )
 
-        return self.smooth3(p3), self.smooth4(p4), self.smooth5(p5)
+        p2 = self.smooth2(p2)
+        p3 = self.smooth3(p3)
+        p4 = self.smooth4(p4)
+        p5 = self.smooth5(p5)
+
+        n2 = p2
+        n3 = self.pan3(p3 + self.down2(n2))
+        n4 = self.pan4(p4 + self.down3(n3))
+        n5 = self.pan5(p5 + self.down4(n4))
+
+        return n2, n3, n4, n5

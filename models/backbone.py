@@ -6,10 +6,10 @@ from torchvision.models import ResNet34_Weights, resnet34
 
 
 class ResNet34Backbone(nn.Module):
-    """ResNet-34 feature extractor returning strides 8, 16, and 32."""
+    """ResNet-34 feature extractor returning strides 4, 8, 16, and 32."""
 
-    out_channels = (128, 256, 512)
-    strides = (8, 16, 32)
+    out_channels = (64, 128, 256, 512)
+    strides = (4, 8, 16, 32)
 
     def __init__(self, pretrained: bool = False, freeze_stem: bool = False) -> None:
         super().__init__()
@@ -32,8 +32,8 @@ class ResNet34Backbone(nn.Module):
                 parameter.requires_grad = False
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        x = self.stem(x)
-        c3 = self.layer2(x)
+        c2 = self.stem(x)
+        c3 = self.layer2(c2)
         c4 = self.layer3(c3)
         c5 = self.layer4(c4)
-        return c3, c4, c5
+        return c2, c3, c4, c5

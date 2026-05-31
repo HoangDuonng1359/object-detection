@@ -114,6 +114,14 @@ class YoloDetectionLoss(nn.Module):
 
     def choose_scale(self, width: torch.Tensor, height: torch.Tensor) -> int:
         max_side = float(torch.maximum(width, height).item())
+        if len(self.strides) >= 4:
+            if max_side <= self.small_object_max_side:
+                return 0
+            if max_side <= self.medium_object_max_side:
+                return 1
+            if max_side <= self.medium_object_max_side * 2.0:
+                return 2
+            return min(3, len(self.strides) - 1)
         if max_side <= self.small_object_max_side:
             return 0
         if max_side <= self.medium_object_max_side:
