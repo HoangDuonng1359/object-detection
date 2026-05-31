@@ -18,6 +18,7 @@ from tqdm.auto import tqdm
 from models.yolo import DEFAULT_CLASSES, build_model
 from utils.dataset import make_dataloader
 from utils.loss import YoloDetectionLoss
+from utils.thresholds import make_class_threshold_tensor, parse_class_thresholds
 
 
 def parse_args() -> argparse.Namespace:
@@ -56,6 +57,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no_progress", action="store_true")
 
     parser.add_argument("--conf_threshold", type=float, default=0.25)
+    parser.add_argument(
+        "--class_thresholds",
+        default="",
+        help='Comma-separated per-class thresholds for validation, e.g. "chair=0.15,car=0.20".',
+    )
     parser.add_argument("--nms_threshold", type=float, default=0.45)
     parser.add_argument("--max_detections", type=int, default=100)
     parser.add_argument(
@@ -132,6 +138,7 @@ def decode_batch_predictions(
     criterion: YoloDetectionLoss,
     image_size: int,
     conf_threshold: float,
+    class_thresholds: torch.Tensor | None,
     nms_threshold: float,
     max_detections: int,
 ) -> list[dict[str, torch.Tensor]]:
@@ -154,11 +161,16 @@ def decode_batch_predictions(
             criterion.num_classes,
         ).max(dim=-1)
         scores = objectness * class_scores
+        thresholds = (
+            class_thresholds[class_labels]
+            if class_thresholds is not None
+            else conf_threshold
+        )
 
         boxes[..., 0::2].clamp_(0, float(image_size))
         boxes[..., 1::2].clamp_(0, float(image_size))
         valid = (
-            (scores >= conf_threshold)
+            (scores >= thresholds)
             & (boxes[..., 2] > boxes[..., 0])
             & (boxes[..., 3] > boxes[..., 1])
         )
@@ -372,6 +384,7 @@ def validate(
     device: torch.device,
     image_size: int,
     conf_threshold: float,
+    class_thresholds: torch.Tensor | None,
     nms_threshold: float,
     max_detections: int,
     max_val_batches: int,
@@ -410,6 +423,7 @@ def validate(
             criterion,
             image_size=image_size,
             conf_threshold=conf_threshold,
+            class_thresholds=class_thresholds,
             nms_threshold=nms_threshold,
             max_detections=max_detections,
         )
@@ -503,6 +517,7 @@ def append_history(
         "freeze_backbone_stem",
         "amp",
         "conf_threshold",
+        "class_thresholds",
         "nms_threshold",
         "max_detections",
         "seed",
@@ -544,6 +559,7 @@ def append_history(
         "freeze_backbone_stem": args.freeze_backbone_stem,
         "amp": args.amp,
         "conf_threshold": args.conf_threshold,
+        "class_thresholds": args.class_thresholds,
         "nms_threshold": args.nms_threshold,
         "max_detections": args.max_detections,
         "seed": args.seed,
@@ -618,6 +634,18 @@ def main() -> None:
         strides=raw_model.strides,
         num_classes=len(DEFAULT_CLASSES),
     ).to(device)
+    class_thresholds = make_class_threshold_tensor(
+        DEFAULT_CLASSES,
+        args.conf_threshold,
+        parse_class_thresholds(args.class_thresholds),
+        device=device,
+    )
+    if args.class_thresholds:
+        pairs = ", ".join(
+            f"{class_name}={float(class_thresholds[index]):.3f}"
+            for index, class_name in enumerate(DEFAULT_CLASSES)
+        )
+        print(f"class_thresholds: {pairs}")
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = make_scheduler(optimizer, args.epochs, args.warmup_epochs)
 
@@ -648,6 +676,7 @@ def main() -> None:
             device=device,
             image_size=args.image_size,
             conf_threshold=args.conf_threshold,
+            class_thresholds=class_thresholds,
             nms_threshold=args.nms_threshold,
             max_detections=args.max_detections,
             max_val_batches=args.max_val_batches,

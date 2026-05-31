@@ -11,6 +11,7 @@ from PIL import Image
 from models.yolo import DEFAULT_CLASSES, DEFAULT_STRIDES, YoloLite
 from utils.augmentation import image_to_normalized_tensor, letterbox_resize
 from utils.loss import YoloDetectionLoss
+from utils.thresholds import make_class_threshold_tensor, parse_class_thresholds
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
@@ -23,6 +24,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", type=Path, default=Path("models/best.pth"))
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--conf_threshold", type=float, default=0.25)
+    parser.add_argument(
+        "--class_thresholds",
+        default="",
+        help='Comma-separated per-class thresholds, e.g. "chair=0.15,car=0.20".',
+    )
     parser.add_argument("--nms_threshold", type=float, default=0.45)
     parser.add_argument("--max_detections", type=int, default=100)
     parser.add_argument("--device", default="auto", choices=("auto", "cpu", "cuda"))
@@ -130,6 +136,7 @@ def decode_predictions(
     criterion: YoloDetectionLoss,
     image_size: int,
     conf_threshold: float,
+    class_thresholds: torch.Tensor | None = None,
 ) -> list[dict[str, torch.Tensor]]:
     batch_size = predictions[0].shape[0]
     batch_boxes = [[] for _ in range(batch_size)]
@@ -150,11 +157,16 @@ def decode_predictions(
             criterion.num_classes,
         ).max(dim=-1)
         scores = objectness * class_scores
+        thresholds = (
+            class_thresholds[class_labels]
+            if class_thresholds is not None
+            else conf_threshold
+        )
 
         boxes[..., 0::2].clamp_(0, float(image_size))
         boxes[..., 1::2].clamp_(0, float(image_size))
         valid = (
-            (scores >= conf_threshold)
+            (scores >= thresholds)
             & (boxes[..., 2] > boxes[..., 0])
             & (boxes[..., 3] > boxes[..., 1])
         )
@@ -241,6 +253,12 @@ def postprocess_single(
 def predict(args: argparse.Namespace) -> list[dict[str, Any]]:
     device = choose_device(args.device)
     model, classes, image_size = load_model(args.checkpoint, device)
+    class_thresholds = make_class_threshold_tensor(
+        classes,
+        args.conf_threshold,
+        parse_class_thresholds(args.class_thresholds),
+        device=device,
+    )
     criterion = YoloDetectionLoss(
         strides=model.strides,
         num_classes=len(classes),
@@ -260,6 +278,7 @@ def predict(args: argparse.Namespace) -> list[dict[str, Any]]:
             criterion,
             image_size=image_size,
             conf_threshold=args.conf_threshold,
+            class_thresholds=class_thresholds,
         )
         for decoded, meta in zip(decoded_batch, metas):
             results.append(

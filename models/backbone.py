@@ -31,7 +31,10 @@ class ResNet34Backbone(nn.Module):
             for parameter in self.stem.parameters():
                 parameter.requires_grad = False
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(
+        self,
+        x: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         c2 = self.stem(x)
         c3 = self.layer2(c2)
         c4 = self.layer3(c3)
