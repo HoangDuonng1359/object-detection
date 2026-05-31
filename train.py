@@ -92,6 +92,10 @@ def move_targets_to_device(
     return moved
 
 
+def unwrap_model(model: nn.Module) -> nn.Module:
+    return model.module if isinstance(model, nn.DataParallel) else model
+
+
 def bbox_iou(box: torch.Tensor, boxes: torch.Tensor) -> torch.Tensor:
     x1 = torch.maximum(box[0], boxes[:, 0])
     y1 = torch.maximum(box[1], boxes[:, 1])
@@ -451,15 +455,17 @@ def save_checkpoint(
         key: str(value) if isinstance(value, Path) else value
         for key, value in vars(args).items()
     }
+    raw_model = unwrap_model(model)
     checkpoint = {
-        "model_state": model.state_dict(),
+        "model_state": raw_model.state_dict(),
         "optimizer_state": optimizer.state_dict(),
         "epoch": epoch,
         "classes": list(DEFAULT_CLASSES),
         "architecture": "anchor_free_decoupled_yolo_lite_resnet34_p2_pan",
-        "strides": list(model.strides),
+        "strides": list(raw_model.strides),
         "image_size": args.image_size,
         "best_map": best_map,
+        "data_parallel": isinstance(model, nn.DataParallel),
         "args": serializable_args,
     }
     torch.save(checkpoint, path)
@@ -569,7 +575,8 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = args.amp and device.type == "cuda"
-    print(f"device={device} amp={use_amp}")
+    gpu_count = torch.cuda.device_count() if device.type == "cuda" else 0
+    print(f"device={device} amp={use_amp} gpu_count={gpu_count}")
 
     train_loader = make_dataloader(
         annotation_file=args.train_data,
@@ -597,8 +604,18 @@ def main() -> None:
         freeze_backbone_stem=args.freeze_backbone_stem,
         image_size=args.image_size,
     ).to(device)
+    if gpu_count > 1:
+        if args.batch_size < gpu_count:
+            print(
+                f"warning: batch_size={args.batch_size} is smaller than gpu_count={gpu_count}; "
+                "some GPUs may be unused."
+            )
+        model = nn.DataParallel(model)
+        print(f"using DataParallel on {gpu_count} GPUs")
+
+    raw_model = unwrap_model(model)
     criterion = YoloDetectionLoss(
-        strides=model.strides,
+        strides=raw_model.strides,
         num_classes=len(DEFAULT_CLASSES),
     ).to(device)
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
