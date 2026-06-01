@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import math
 import random
 from collections import defaultdict
@@ -711,6 +712,9 @@ def main() -> None:
             f"val_map50={current_map:.4f} "
             f"best_map50={best_map:.4f}"
         )
+        gc.collect()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
     print(f"best_checkpoint={best_path}")
     print(f"history={history_path}")
