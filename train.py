@@ -55,6 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pretrained_backbone", action="store_true")
     parser.add_argument("--freeze_backbone_stem", action="store_true")
     parser.add_argument("--amp", action="store_true")
+    parser.add_argument("--disable_multi_gpu", action="store_true")
     parser.add_argument("--no_progress", action="store_true")
 
     parser.add_argument("--conf_threshold", type=float, default=0.25)
@@ -517,6 +518,7 @@ def append_history(
         "pretrained_backbone",
         "freeze_backbone_stem",
         "amp",
+        "disable_multi_gpu",
         "conf_threshold",
         "class_thresholds",
         "nms_threshold",
@@ -559,6 +561,7 @@ def append_history(
         "pretrained_backbone": args.pretrained_backbone,
         "freeze_backbone_stem": args.freeze_backbone_stem,
         "amp": args.amp,
+        "disable_multi_gpu": args.disable_multi_gpu,
         "conf_threshold": args.conf_threshold,
         "class_thresholds": args.class_thresholds,
         "nms_threshold": args.nms_threshold,
@@ -621,7 +624,7 @@ def main() -> None:
         freeze_backbone_stem=args.freeze_backbone_stem,
         image_size=args.image_size,
     ).to(device)
-    if gpu_count > 1:
+    if gpu_count > 1 and not args.disable_multi_gpu:
         if args.batch_size < gpu_count:
             print(
                 f"warning: batch_size={args.batch_size} is smaller than gpu_count={gpu_count}; "
@@ -629,6 +632,8 @@ def main() -> None:
             )
         model = nn.DataParallel(model)
         print(f"using DataParallel on {gpu_count} GPUs")
+    elif gpu_count > 1:
+        print("multi-GPU disabled; using one GPU")
 
     raw_model = unwrap_model(model)
     criterion = YoloDetectionLoss(
