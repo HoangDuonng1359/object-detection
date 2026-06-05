@@ -9,7 +9,7 @@ from .neck import SimpleFPN
 
 
 DEFAULT_CLASSES = ("person", "car", "dog", "cat", "chair")
-DEFAULT_STRIDES = (4, 8, 16, 32)
+DEFAULT_STRIDES = (8, 16, 32)
 
 
 class YoloLite(nn.Module):

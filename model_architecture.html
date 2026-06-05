@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>YOLO-Lite Architecture</title>
+  <style>
+    :root {
+      --bg: #f7f8fb;
+      --ink: #172033;
+      --muted: #5b6578;
+      --panel: #ffffff;
+      --line: #cbd5e1;
+      --blue: #2563eb;
+      --green: #15803d;
+      --amber: #b45309;
+      --violet: #7c3aed;
+      --red: #be123c;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: Arial, Helvetica, sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+      line-height: 1.5;
+    }
+
+    header {
+      padding: 28px 32px;
+      background: #111827;
+      color: #ffffff;
+      border-bottom: 4px solid var(--blue);
+    }
+
+    header h1 {
+      margin: 0 0 8px;
+      font-size: 30px;
+      letter-spacing: 0;
+    }
+
+    header p {
+      margin: 0;
+      color: #d1d5db;
+      max-width: 920px;
+    }
+
+    main {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 28px;
+    }
+
+    section {
+      margin-bottom: 28px;
+      padding: 24px;
+      background: var(--panel);
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
+    }
+
+    h2 { margin: 0 0 16px; font-size: 22px; }
+    h3 { margin: 18px 0 8px; font-size: 17px; }
+    p { margin: 0 0 12px; }
+
+    code {
+      padding: 2px 5px;
+      background: #eef2ff;
+      color: #1e3a8a;
+      border-radius: 4px;
+      font-family: Consolas, Monaco, monospace;
+    }
+
+    pre {
+      margin: 12px 0 0;
+      padding: 14px;
+      overflow-x: auto;
+      background: #0f172a;
+      color: #e5e7eb;
+      border-radius: 8px;
+      font-family: Consolas, Monaco, monospace;
+      font-size: 14px;
+    }
+
+    table {
+      width: 100%;
+      margin-top: 12px;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+
+    th, td {
+      padding: 10px 12px;
+      border-bottom: 1px solid #e5e7eb;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: #f1f5f9;
+      font-weight: 700;
+    }
+
+    .diagram-wrap {
+      overflow-x: auto;
+      padding: 8px 0;
+    }
+
+    svg {
+      max-width: 100%;
+      height: auto;
+      display: block;
+      margin: 0 auto;
+    }
+
+    .box {
+      fill: #ffffff;
+      stroke: var(--line);
+      stroke-width: 2;
+      rx: 8;
+    }
+
+    .input { fill: #dbeafe; stroke: var(--blue); }
+    .backbone { fill: #dcfce7; stroke: var(--green); }
+    .neck { fill: #fef3c7; stroke: var(--amber); }
+    .head { fill: #ede9fe; stroke: var(--violet); }
+    .post { fill: #ffe4e6; stroke: var(--red); }
+    .text-main { font-size: 15px; font-weight: 700; fill: #111827; }
+    .text-sub { font-size: 12px; fill: #4b5563; }
+    .arrow { stroke: #475569; stroke-width: 2.2; marker-end: url(#arrow); fill: none; }
+    .arrow-soft { stroke: #94a3b8; stroke-width: 2; marker-end: url(#arrow-soft); fill: none; stroke-dasharray: 5 5; }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .mini-card {
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 14px;
+      background: #fbfdff;
+    }
+
+    .mini-card strong {
+      display: block;
+      margin-bottom: 6px;
+    }
+
+    .note {
+      border-left: 4px solid var(--blue);
+      background: #eff6ff;
+      padding: 12px 14px;
+      border-radius: 6px;
+      color: #1e3a8a;
+    }
+
+    .warn {
+      border-left-color: var(--amber);
+      background: #fffbeb;
+      color: #78350f;
+    }
+
+    @media (max-width: 800px) {
+      main { padding: 16px; }
+      header { padding: 24px 18px; }
+      .grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>YOLO-Lite: ResNet34 + 3-Scale Weighted PAN + Anchor-Free Head</h1>
+    <p>
+      Kiến trúc hiện tại đã bỏ P2 stride 4 để giảm VRAM và tăng tốc.
+      Model còn 3 scale dự đoán: stride 8, 16, 32.
+    </p>
+  </header>
+
+  <main>
+    <section>
+      <h2>1. Sơ Đồ Tổng Quan</h2>
+      <div class="diagram-wrap">
+        <svg width="1120" height="300" viewBox="0 0 1120 300" role="img" aria-label="Overall model architecture">
+          <defs>
+            <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+              <path d="M0,0 L0,6 L9,3 z" fill="#475569"></path>
+            </marker>
+            <marker id="arrow-soft" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+              <path d="M0,0 L0,6 L9,3 z" fill="#94a3b8"></path>
+            </marker>
+          </defs>
+
+          <rect class="box input" x="20" y="100" width="135" height="90"></rect>
+          <text class="text-main" x="87" y="132" text-anchor="middle">Input</text>
+          <text class="text-sub" x="87" y="154" text-anchor="middle">RGB image</text>
+          <text class="text-sub" x="87" y="172" text-anchor="middle">letterbox 512</text>
+
+          <path class="arrow" d="M155 145 H205"></path>
+
+          <rect class="box backbone" x="205" y="55" width="175" height="180"></rect>
+          <text class="text-main" x="292" y="86" text-anchor="middle">ResNet34</text>
+          <text class="text-sub" x="292" y="109" text-anchor="middle">pretrained optional</text>
+          <text class="text-sub" x="292" y="142" text-anchor="middle">C3 stride 8</text>
+          <text class="text-sub" x="292" y="168" text-anchor="middle">C4 stride 16</text>
+          <text class="text-sub" x="292" y="194" text-anchor="middle">C5 stride 32</text>
+
+          <path class="arrow" d="M380 145 H430"></path>
+
+          <rect class="box neck" x="430" y="55" width="210" height="180"></rect>
+          <text class="text-main" x="535" y="86" text-anchor="middle">Weighted FPN + PAN Neck</text>
+          <text class="text-sub" x="535" y="113" text-anchor="middle">learnable weighted fusion</text>
+          <text class="text-sub" x="535" y="136" text-anchor="middle">top-down + bottom-up paths</text>
+          <text class="text-sub" x="535" y="171" text-anchor="middle">N3, N4, N5</text>
+          <text class="text-sub" x="535" y="196" text-anchor="middle">256 channels each</text>
+
+          <path class="arrow" d="M640 145 H690"></path>
+
+          <rect class="box head" x="690" y="55" width="190" height="180"></rect>
+          <text class="text-main" x="785" y="86" text-anchor="middle">Decoupled Head</text>
+          <text class="text-sub" x="785" y="118" text-anchor="middle">box tower</text>
+          <text class="text-sub" x="785" y="141" text-anchor="middle">objectness</text>
+          <text class="text-sub" x="785" y="164" text-anchor="middle">class tower</text>
+          <text class="text-sub" x="785" y="198" text-anchor="middle">10 channels/scale</text>
+
+          <path class="arrow" d="M880 145 H930"></path>
+
+          <rect class="box post" x="930" y="78" width="165" height="136"></rect>
+          <text class="text-main" x="1012" y="111" text-anchor="middle">Postprocess</text>
+          <text class="text-sub" x="1012" y="136" text-anchor="middle">decode boxes</text>
+          <text class="text-sub" x="1012" y="156" text-anchor="middle">class thresholds</text>
+          <text class="text-sub" x="1012" y="176" text-anchor="middle">per-class NMS</text>
+          <text class="text-sub" x="1012" y="196" text-anchor="middle">JSON output</text>
+        </svg>
+      </div>
+    </section>
+
+    <section>
+      <h2>2. Feature Pyramid Sau Khi Bỏ P2</h2>
+      <p>
+        P2 stride 4 đã được gỡ để giảm bộ nhớ. Với input 512, model không còn tạo
+        feature map 128 x 128 nữa. Scale nhỏ nhất hiện là stride 8, tức 64 x 64.
+      </p>
+
+      <div class="diagram-wrap">
+        <svg width="980" height="340" viewBox="0 0 980 340" role="img" aria-label="Three scale FPN PAN diagram">
+          <defs>
+            <marker id="arrow2" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+              <path d="M0,0 L0,6 L9,3 z" fill="#475569"></path>
+            </marker>
+          </defs>
+
+          <rect class="box backbone" x="50" y="45" width="130" height="55"></rect>
+          <text class="text-main" x="115" y="78" text-anchor="middle">C5</text>
+          <text class="text-sub" x="115" y="95" text-anchor="middle">16 x 16</text>
+
+          <rect class="box backbone" x="50" y="135" width="130" height="55"></rect>
+          <text class="text-main" x="115" y="168" text-anchor="middle">C4</text>
+          <text class="text-sub" x="115" y="185" text-anchor="middle">32 x 32</text>
+
+          <rect class="box backbone" x="50" y="225" width="130" height="55"></rect>
+          <text class="text-main" x="115" y="258" text-anchor="middle">C3</text>
+          <text class="text-sub" x="115" y="275" text-anchor="middle">64 x 64</text>
+
+          <rect class="box neck" x="310" y="45" width="130" height="55"></rect>
+          <text class="text-main" x="375" y="78" text-anchor="middle">P5</text>
+          <text class="text-sub" x="375" y="95" text-anchor="middle">FPN</text>
+
+          <rect class="box neck" x="310" y="135" width="130" height="55"></rect>
+          <text class="text-main" x="375" y="168" text-anchor="middle">P4</text>
+          <text class="text-sub" x="375" y="185" text-anchor="middle">weighted(C4, up(P5))</text>
+
+          <rect class="box neck" x="310" y="225" width="130" height="55"></rect>
+          <text class="text-main" x="375" y="258" text-anchor="middle">P3</text>
+          <text class="text-sub" x="375" y="275" text-anchor="middle">weighted(C3, up(P4))</text>
+
+          <rect class="box head" x="650" y="45" width="145" height="55"></rect>
+          <text class="text-main" x="722" y="78" text-anchor="middle">N5</text>
+          <text class="text-sub" x="722" y="95" text-anchor="middle">stride 32</text>
+
+          <rect class="box head" x="650" y="135" width="145" height="55"></rect>
+          <text class="text-main" x="722" y="168" text-anchor="middle">N4</text>
+          <text class="text-sub" x="722" y="185" text-anchor="middle">stride 16</text>
+
+          <rect class="box head" x="650" y="225" width="145" height="55"></rect>
+          <text class="text-main" x="722" y="258" text-anchor="middle">N3</text>
+          <text class="text-sub" x="722" y="275" text-anchor="middle">stride 8</text>
+
+          <path class="arrow" d="M180 72 H310"></path>
+          <path class="arrow" d="M180 162 H310"></path>
+          <path class="arrow" d="M180 252 H310"></path>
+
+          <path class="arrow-soft" d="M440 72 C520 74 520 162 440 162"></path>
+          <path class="arrow-soft" d="M440 162 C520 164 520 252 440 252"></path>
+
+          <path class="arrow" d="M440 252 H650"></path>
+          <path class="arrow" d="M440 162 H650"></path>
+          <path class="arrow" d="M440 72 H650"></path>
+
+          <path class="arrow-soft" d="M795 252 C875 252 875 162 795 162"></path>
+          <path class="arrow-soft" d="M795 162 C875 162 875 72 795 72"></path>
+        </svg>
+      </div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Scale</th>
+            <th>Stride</th>
+            <th>Feature size khi input 512</th>
+            <th>Vai trò</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>N3</td>
+            <td>8</td>
+            <td>64 x 64</td>
+            <td>Object nhỏ đến vừa.</td>
+          </tr>
+          <tr>
+            <td>N4</td>
+            <td>16</td>
+            <td>32 x 32</td>
+            <td>Object vừa đến lớn.</td>
+          </tr>
+          <tr>
+            <td>N5</td>
+            <td>32</td>
+            <td>16 x 16</td>
+            <td>Object lớn, ngữ nghĩa mạnh.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>3. Head Dự Đoán Gì?</h2>
+      <div class="grid">
+        <div class="mini-card">
+          <strong>Box tower</strong>
+          Dự đoán <code>tx, ty, tw, th</code> để decode thành bbox.
+        </div>
+        <div class="mini-card">
+          <strong>Objectness</strong>
+          Dự đoán xác suất cell có object.
+        </div>
+        <div class="mini-card">
+          <strong>Class tower</strong>
+          Dự đoán logits cho <code>person, car, dog, cat, chair</code>.
+        </div>
+        <div class="mini-card">
+          <strong>Confidence</strong>
+          <code>sigmoid(objectness) * max_class_probability</code>.
+        </div>
+      </div>
+
+      <pre><code>Output for IMAGE_SIZE = 512:
+[
+  B x 10 x 64 x 64,  # stride 8
+  B x 10 x 32 x 32,  # stride 16
+  B x 10 x 16 x 16,  # stride 32
+]</code></pre>
+    </section>
+
+    <section>
+      <h2>4. Box Decoding</h2>
+      <pre><code>center_x = (sigmoid(tx) + grid_x) * stride
+center_y = (sigmoid(ty) + grid_y) * stride
+box_w    = exp(tw) * stride
+box_h    = exp(th) * stride
+
+bbox = [
+  center_x - box_w / 2,
+  center_y - box_h / 2,
+  center_x + box_w / 2,
+  center_y + box_h / 2,
+]</code></pre>
+    </section>
+
+    <section>
+      <h2>5. Loss Khi Train</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Thành phần</th>
+            <th>Phương pháp</th>
+            <th>Trọng số</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Box loss</td>
+            <td><code>1 - CIoU</code></td>
+            <td>5.0</td>
+          </tr>
+          <tr>
+            <td>Objectness loss</td>
+            <td>Focal BCE with logits</td>
+            <td>1.0</td>
+          </tr>
+          <tr>
+            <td>Class loss</td>
+            <td>Cross entropy</td>
+            <td>0.5</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="note">
+        Sau khi bỏ P2, object nhỏ nhất được gán về stride 8 thay vì stride 4.
+        Điều này nhẹ hơn đáng kể, nhưng có thể làm recall của object rất nhỏ giảm một chút.
+      </div>
+    </section>
+
+    <section>
+      <h2>6. Predict Và NMS</h2>
+      <pre><code>image
+  -> letterbox resize
+  -> normalize
+  -> model forward
+  -> decode boxes
+  -> class threshold
+  -> NMS riêng từng class
+  -> scale bbox về ảnh gốc
+  -> predictions.json</code></pre>
+
+      <pre><code>python predict.py \
+  --image_dir public/val/images \
+  --output predictions.json \
+  --checkpoint models/best.pth \
+  --conf_threshold 0.25 \
+  --class_thresholds "person=0.25,car=0.20,dog=0.25,cat=0.25,chair=0.10" \
+  --nms_threshold 0.35</code></pre>
+
+      <div class="note warn">
+        Hạ threshold tăng recall nhưng cũng có thể tăng false positive.
+        Nên chọn threshold bằng validation sweep.
+      </div>
+    </section>
+
+    <section>
+      <h2>7. Tóm Tắt</h2>
+      <table>
+        <tbody>
+          <tr>
+            <th>Backbone</th>
+            <td>ResNet34, có thể dùng pretrained ImageNet.</td>
+          </tr>
+          <tr>
+            <th>Neck</th>
+            <td>Custom weighted FPN + PAN, 3 scale, 256 channels.</td>
+          </tr>
+          <tr>
+            <th>Head</th>
+            <td>Anchor-free decoupled head.</td>
+          </tr>
+          <tr>
+            <th>Strides</th>
+            <td>8, 16, 32.</td>
+          </tr>
+          <tr>
+            <th>Output channels</th>
+            <td>10 per scale = 4 bbox + 1 objectness + 5 class logits.</td>
+          </tr>
+          <tr>
+            <th>Lợi ích sau khi bỏ P2</th>
+            <td>Ít tốn VRAM hơn, train ổn định hơn, predict nhanh hơn.</td>
+          </tr>
+          <tr>
+            <th>Đánh đổi</th>
+            <td>Object rất nhỏ có thể khó bắt hơn so với bản có stride 4.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+  </main>
+</body>
+</html>

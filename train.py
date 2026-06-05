@@ -67,6 +67,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--nms_threshold", type=float, default=0.45)
     parser.add_argument("--max_detections", type=int, default=100)
     parser.add_argument(
+        "--best_metric",
+        choices=("map50", "val_loss"),
+        default="map50",
+        help="Metric used to choose best.pth.",
+    )
+    parser.add_argument(
         "--max_val_batches",
         type=int,
         default=0,
@@ -477,10 +483,11 @@ def save_checkpoint(
         "optimizer_state": optimizer.state_dict(),
         "epoch": epoch,
         "classes": list(DEFAULT_CLASSES),
-        "architecture": "anchor_free_decoupled_yolo_lite_resnet34_p2_pan",
+        "architecture": "anchor_free_decoupled_yolo_lite_resnet34_weighted_pan",
         "strides": list(raw_model.strides),
         "image_size": args.image_size,
         "best_map": best_map,
+        "best_metric": args.best_metric,
         "data_parallel": isinstance(model, nn.DataParallel),
         "args": serializable_args,
     }
@@ -523,6 +530,7 @@ def append_history(
         "class_thresholds",
         "nms_threshold",
         "max_detections",
+        "best_metric",
         "seed",
         "train_loss",
         "train_box_loss",
@@ -566,6 +574,7 @@ def append_history(
         "class_thresholds": args.class_thresholds,
         "nms_threshold": args.nms_threshold,
         "max_detections": args.max_detections,
+        "best_metric": args.best_metric,
         "seed": args.seed,
         "train_loss": train_metrics.get("loss", 0.0),
         "train_box_loss": train_metrics.get("box_loss", 0.0),
@@ -656,6 +665,7 @@ def main() -> None:
     scheduler = make_scheduler(optimizer, args.epochs, args.warmup_epochs)
 
     best_map = -1.0
+    best_score = float("inf") if args.best_metric == "val_loss" else -1.0
     best_path = args.checkpoint_dir / "best.pth"
     last_path = args.checkpoint_dir / "last.pth"
     started = datetime.now()
@@ -691,9 +701,17 @@ def main() -> None:
         scheduler.step()
 
         current_map = val_metrics["mAP@0.5"]
-        is_best = current_map > best_map
+        current_score = (
+            val_metrics["loss"] if args.best_metric == "val_loss" else current_map
+        )
+        is_best = (
+            current_score < best_score
+            if args.best_metric == "val_loss"
+            else current_score > best_score
+        )
         if is_best:
             best_map = current_map
+            best_score = current_score
             save_checkpoint(best_path, model, optimizer, epoch + 1, best_map, args)
         save_checkpoint(last_path, model, optimizer, epoch + 1, best_map, args)
 
@@ -715,7 +733,8 @@ def main() -> None:
             f"train_loss={train_metrics['loss']:.4f} "
             f"val_loss={val_metrics['loss']:.4f} "
             f"val_map50={current_map:.4f} "
-            f"best_map50={best_map:.4f}"
+            f"best_map50={best_map:.4f} "
+            f"best_metric={args.best_metric}"
         )
         gc.collect()
         if device.type == "cuda":
