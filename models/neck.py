@@ -56,7 +56,7 @@ class SimpleFPN(nn.Module):
 
     def __init__(
         self,
-        in_channels: tuple[int, int, int] = (128, 256, 512),
+        in_channels: tuple[int, int, int] = (512, 1024, 2048),
         out_channels: int = 256,
     ) -> None:
         super().__init__()

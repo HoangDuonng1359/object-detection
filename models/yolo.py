@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from .backbone import ResNet34Backbone
+from .backbone import ResNet50Backbone
 from .head import DetectionHead
 from .neck import SimpleFPN
 
@@ -26,7 +26,7 @@ class YoloLite(nn.Module):
         self.num_outputs = 5 + num_classes
         self.strides = tuple(int(stride) for stride in strides)
 
-        self.backbone = ResNet34Backbone(
+        self.backbone = ResNet50Backbone(
             pretrained=pretrained_backbone,
             freeze_stem=freeze_backbone_stem,
         )

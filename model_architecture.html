@@ -174,7 +174,7 @@
 </head>
 <body>
   <header>
-    <h1>YOLO-Lite: ResNet34 + 3-Scale Weighted PAN + Anchor-Free Head</h1>
+    <h1>YOLO-Lite: ResNet50 + 3-Scale Weighted PAN + Anchor-Free Head</h1>
     <p>
       Kiến trúc hiện tại đã bỏ P2 stride 4 để giảm VRAM và tăng tốc.
       Model còn 3 scale dự đoán: stride 8, 16, 32.
@@ -203,7 +203,7 @@
           <path class="arrow" d="M155 145 H205"></path>
 
           <rect class="box backbone" x="205" y="55" width="175" height="180"></rect>
-          <text class="text-main" x="292" y="86" text-anchor="middle">ResNet34</text>
+          <text class="text-main" x="292" y="86" text-anchor="middle">ResNet50</text>
           <text class="text-sub" x="292" y="109" text-anchor="middle">pretrained optional</text>
           <text class="text-sub" x="292" y="142" text-anchor="middle">C3 stride 8</text>
           <text class="text-sub" x="292" y="168" text-anchor="middle">C4 stride 16</text>
@@ -449,7 +449,7 @@ bbox = [
         <tbody>
           <tr>
             <th>Backbone</th>
-            <td>ResNet34, có thể dùng pretrained ImageNet.</td>
+            <td>ResNet50, có thể dùng pretrained ImageNet.</td>
           </tr>
           <tr>
             <th>Neck</th>

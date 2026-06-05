@@ -483,7 +483,7 @@ def save_checkpoint(
         "optimizer_state": optimizer.state_dict(),
         "epoch": epoch,
         "classes": list(DEFAULT_CLASSES),
-        "architecture": "anchor_free_decoupled_yolo_lite_resnet34_weighted_pan",
+        "architecture": "anchor_free_decoupled_yolo_lite_resnet50_weighted_pan",
         "strides": list(raw_model.strides),
         "image_size": args.image_size,
         "best_map": best_map,

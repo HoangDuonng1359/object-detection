@@ -1,6 +1,6 @@
 # Object Detection YOLO-Lite
 
-This project implements an object detector from scratch with PyTorch. The model uses a pretrained ResNet34 feature extractor, a custom FPN/PAN neck, a decoupled anchor-free detection head, a custom detection loss, and per-class NMS during inference.
+This project implements an object detector from scratch with PyTorch. The model uses a pretrained ResNet50 feature extractor, a custom FPN/PAN neck, a decoupled anchor-free detection head, a custom detection loss, and per-class NMS during inference.
 
 ## Setup
 
@@ -27,14 +27,14 @@ public/
 
 ## Model Architecture
 
-The detector is implemented as a small anchor-free YOLO-style model. It does not use any complete object detection framework such as YOLOv5/v8, Detectron2, MMDetection, Faster R-CNN, or SSD. The only pretrained component is the ResNet34 classification backbone from `torchvision`.
+The detector is implemented as a small anchor-free YOLO-style model. It does not use any complete object detection framework such as YOLOv5/v8, Detectron2, MMDetection, Faster R-CNN, or SSD. The only pretrained component is the ResNet50 classification backbone from `torchvision`.
 
 ### Overview
 
 ```text
 Input image
   -> Letterbox resize + ImageNet normalization
-  -> ResNet34 backbone
+  -> ResNet50 backbone
   -> 3-scale weighted FPN + PAN neck
   -> Decoupled anchor-free detection heads
   -> Decode boxes + confidence filtering + per-class NMS
@@ -51,14 +51,14 @@ person, car, dog, cat, chair
 
 File: `models/backbone.py`
 
-The backbone is `ResNet34Backbone`, built from `torchvision.models.resnet34`.
+The backbone is `ResNet50Backbone`, built from `torchvision.models.resnet50`.
 
-When `--pretrained_backbone` is enabled, ImageNet pretrained ResNet34 weights are used. The detector removes the classification head and returns intermediate feature maps:
+When `--pretrained_backbone` is enabled, ImageNet pretrained ResNet50 weights are used. The detector removes the classification head and returns intermediate feature maps:
 
 ```text
-C3: stride 8,  channels 128
-C4: stride 16, channels 256
-C5: stride 32, channels 512
+C3: stride 8,  channels 512
+C4: stride 16, channels 1024
+C5: stride 32, channels 2048
 ```
 
 The model uses three detection scales to reduce memory use while still covering small, medium, and large objects.
