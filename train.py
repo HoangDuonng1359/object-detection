@@ -5,6 +5,7 @@ import csv
 import gc
 import math
 import random
+import time
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -56,7 +57,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--freeze_backbone_stem", action="store_true")
     parser.add_argument("--amp", action="store_true")
     parser.add_argument("--disable_multi_gpu", action="store_true")
-    parser.add_argument("--no_progress", action="store_true")
+    parser.add_argument(
+        "--disable_tqdm",
+        action="store_true",
+        help="Disable tqdm progress bars and print only one summary line per epoch.",
+    )
+    parser.add_argument(
+        "--no_progress",
+        action="store_true",
+        help="Alias for --disable_tqdm.",
+    )
 
     parser.add_argument("--conf_threshold", type=float, default=0.25)
     parser.add_argument(
@@ -325,6 +335,17 @@ def make_scheduler(optimizer: torch.optim.Optimizer, epochs: int, warmup_epochs:
     return LambdaLR(optimizer, lr_lambda=lr_lambda)
 
 
+def format_duration(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours:d}h{minutes:02d}m{seconds:02d}s"
+    if minutes:
+        return f"{minutes:d}m{seconds:02d}s"
+    return f"{seconds:d}s"
+
+
 def train_one_epoch(
     model: nn.Module,
     criterion: YoloDetectionLoss,
@@ -344,12 +365,10 @@ def train_one_epoch(
     total_batches = len(loader)
     if max_train_batches > 0:
         total_batches = min(total_batches, max_train_batches)
-    progress = tqdm(
-        loader,
-        total=total_batches,
-        desc="train",
-        leave=False,
-        disable=not show_progress,
+    progress = (
+        tqdm(loader, total=total_batches, desc="train", leave=False)
+        if show_progress
+        else loader
     )
 
     for images, targets in progress:
@@ -372,12 +391,13 @@ def train_one_epoch(
         for key, value in losses.items():
             totals[key] += float(value.detach().cpu())
         steps += 1
-        progress.set_postfix(
-            loss=f"{totals['loss'] / steps:.4f}",
-            box=f"{totals['box_loss'] / steps:.4f}",
-            obj=f"{totals['objectness_loss'] / steps:.4f}",
-            cls=f"{totals['class_loss'] / steps:.4f}",
-        )
+        if show_progress:
+            progress.set_postfix(
+                loss=f"{totals['loss'] / steps:.4f}",
+                box=f"{totals['box_loss'] / steps:.4f}",
+                obj=f"{totals['objectness_loss'] / steps:.4f}",
+                cls=f"{totals['class_loss'] / steps:.4f}",
+            )
         if max_train_batches > 0 and steps >= max_train_batches:
             break
 
@@ -407,12 +427,10 @@ def validate(
     total_batches = len(loader)
     if max_val_batches > 0:
         total_batches = min(total_batches, max_val_batches)
-    progress = tqdm(
-        loader,
-        total=total_batches,
-        desc="val",
-        leave=False,
-        disable=not show_progress,
+    progress = (
+        tqdm(loader, total=total_batches, desc="val", leave=False)
+        if show_progress
+        else loader
     )
 
     for images, targets in progress:
@@ -424,7 +442,8 @@ def validate(
         for key, value in losses.items():
             totals[key] += float(value.detach().cpu())
         steps += 1
-        progress.set_postfix(loss=f"{totals['loss'] / steps:.4f}")
+        if show_progress:
+            progress.set_postfix(loss=f"{totals['loss'] / steps:.4f}")
 
         decoded = decode_batch_predictions(
             outputs,
@@ -503,6 +522,9 @@ def append_history(
     best_map: float,
     args: argparse.Namespace,
     run_started_at: str,
+    train_seconds: float,
+    val_seconds: float,
+    epoch_seconds: float,
     reset_file: bool = False,
 ) -> None:
     fieldnames = [
@@ -526,12 +548,16 @@ def append_history(
         "freeze_backbone_stem",
         "amp",
         "disable_multi_gpu",
+        "disable_tqdm",
         "conf_threshold",
         "class_thresholds",
         "nms_threshold",
         "max_detections",
         "best_metric",
         "seed",
+        "train_seconds",
+        "val_seconds",
+        "epoch_seconds",
         "train_loss",
         "train_box_loss",
         "train_objectness_loss",
@@ -570,12 +596,16 @@ def append_history(
         "freeze_backbone_stem": args.freeze_backbone_stem,
         "amp": args.amp,
         "disable_multi_gpu": args.disable_multi_gpu,
+        "disable_tqdm": args.disable_tqdm or args.no_progress,
         "conf_threshold": args.conf_threshold,
         "class_thresholds": args.class_thresholds,
         "nms_threshold": args.nms_threshold,
         "max_detections": args.max_detections,
         "best_metric": args.best_metric,
         "seed": args.seed,
+        "train_seconds": f"{train_seconds:.2f}",
+        "val_seconds": f"{val_seconds:.2f}",
+        "epoch_seconds": f"{epoch_seconds:.2f}",
         "train_loss": train_metrics.get("loss", 0.0),
         "train_box_loss": train_metrics.get("box_loss", 0.0),
         "train_objectness_loss": train_metrics.get("objectness_loss", 0.0),
@@ -672,8 +702,11 @@ def main() -> None:
     run_started_at = started.strftime("%Y-%m-%d %H:%M:%S")
     history_stamp = started.strftime("%Y%m%d_%H%M%S")
     history_path = args.checkpoint_dir / f"train_history_{history_stamp}.csv"
+    show_progress = not (args.disable_tqdm or args.no_progress)
 
     for epoch in range(args.epochs):
+        epoch_started = time.perf_counter()
+        train_started = time.perf_counter()
         train_metrics = train_one_epoch(
             model=model,
             criterion=criterion,
@@ -683,8 +716,11 @@ def main() -> None:
             grad_clip=args.grad_clip,
             use_amp=use_amp,
             max_train_batches=args.max_train_batches,
-            show_progress=not args.no_progress,
+            show_progress=show_progress,
         )
+        train_seconds = time.perf_counter() - train_started
+
+        val_started = time.perf_counter()
         val_metrics = validate(
             model=model,
             criterion=criterion,
@@ -696,8 +732,9 @@ def main() -> None:
             nms_threshold=args.nms_threshold,
             max_detections=args.max_detections,
             max_val_batches=args.max_val_batches,
-            show_progress=not args.no_progress,
+            show_progress=show_progress,
         )
+        val_seconds = time.perf_counter() - val_started
         scheduler.step()
 
         current_map = val_metrics["mAP@0.5"]
@@ -714,6 +751,7 @@ def main() -> None:
             best_score = current_score
             save_checkpoint(best_path, model, optimizer, epoch + 1, best_map, args)
         save_checkpoint(last_path, model, optimizer, epoch + 1, best_map, args)
+        epoch_seconds = time.perf_counter() - epoch_started
 
         lr = optimizer.param_groups[0]["lr"]
         append_history(
@@ -725,10 +763,16 @@ def main() -> None:
             best_map=best_map,
             args=args,
             run_started_at=run_started_at,
+            train_seconds=train_seconds,
+            val_seconds=val_seconds,
+            epoch_seconds=epoch_seconds,
             reset_file=epoch == 0,
         )
         print(
             f"epoch={epoch + 1}/{args.epochs} "
+            f"epoch_time={format_duration(epoch_seconds)} "
+            f"train_time={format_duration(train_seconds)} "
+            f"val_time={format_duration(val_seconds)} "
             f"lr={lr:.6g} "
             f"train_loss={train_metrics['loss']:.4f} "
             f"val_loss={val_metrics['loss']:.4f} "
