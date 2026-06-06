@@ -44,12 +44,23 @@ class ObjectDetectionDataset(Dataset):
                 raise ValueError(f"Unknown class in annotation: {class_name}")
             self.annotations_by_image[ann["image_id"]].append(ann)
 
+        focus_class_indices = tuple(
+            self.class_to_idx[class_name]
+            for class_name in ("chair",)
+            if class_name in self.class_to_idx
+        )
         self.transform = transform or DetectionTransform(
             image_size=image_size,
             train=train,
             crop_prob=0.25 if train else 0.0,
             hflip_prob=0.5 if train else 0.0,
             color_jitter_prob=0.8 if train else 0.0,
+            scale_translate_prob=0.35 if train else 0.0,
+            grayscale_prob=0.08 if train else 0.0,
+            blur_prob=0.10 if train else 0.0,
+            cutout_prob=0.15 if train else 0.0,
+            focus_label_indices=focus_class_indices if train else (),
+            focus_aug_boost=1.5,
         )
 
     def __len__(self) -> int:

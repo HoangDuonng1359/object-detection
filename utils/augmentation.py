@@ -6,7 +6,7 @@ from typing import Iterable
 
 import numpy as np
 import torch
-from PIL import Image, ImageEnhance, ImageOps
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
@@ -66,6 +66,78 @@ def random_color_jitter(
             continue
         factor = random.uniform(max(0.0, 1.0 - amount), 1.0 + amount)
         image = enhancer_cls(image).enhance(factor)
+    return image
+
+
+def random_scale_translate(
+    image: Image.Image,
+    boxes: torch.Tensor,
+    labels: torch.Tensor,
+    min_scale: float = 0.85,
+    max_scale: float = 1.20,
+    fill: tuple[int, int, int] = (114, 114, 114),
+) -> tuple[Image.Image, torch.Tensor, torch.Tensor]:
+    width, height = image.size
+    if width <= 1 or height <= 1:
+        return image, boxes, labels
+
+    scale = random.uniform(min_scale, max_scale)
+    new_w = max(1, int(round(width * scale)))
+    new_h = max(1, int(round(height * scale)))
+    resized = image.resize((new_w, new_h), Image.BILINEAR)
+
+    if new_w <= width:
+        left = random.randint(0, width - new_w)
+    else:
+        left = random.randint(width - new_w, 0)
+    if new_h <= height:
+        top = random.randint(0, height - new_h)
+    else:
+        top = random.randint(height - new_h, 0)
+
+    canvas = Image.new("RGB", (width, height), fill)
+    canvas.paste(resized, (left, top))
+
+    if boxes.numel() > 0:
+        boxes = boxes.float().clone()
+        boxes[:, 0::2] = boxes[:, 0::2] * scale + float(left)
+        boxes[:, 1::2] = boxes[:, 1::2] * scale + float(top)
+        boxes, labels = sanitize_boxes(boxes, labels, width, height)
+    return canvas, boxes, labels
+
+
+def random_grayscale(image: Image.Image) -> Image.Image:
+    return ImageOps.grayscale(image).convert("RGB")
+
+
+def random_blur(
+    image: Image.Image,
+    min_radius: float = 0.1,
+    max_radius: float = 1.2,
+) -> Image.Image:
+    return image.filter(ImageFilter.GaussianBlur(random.uniform(min_radius, max_radius)))
+
+
+def random_cutout(
+    image: Image.Image,
+    max_holes: int = 2,
+    max_size_ratio: float = 0.16,
+    fill: tuple[int, int, int] = (114, 114, 114),
+) -> Image.Image:
+    width, height = image.size
+    if width <= 1 or height <= 1:
+        return image
+
+    draw = ImageDraw.Draw(image)
+    holes = random.randint(1, max_holes)
+    max_cut_w = max(1, int(width * max_size_ratio))
+    max_cut_h = max(1, int(height * max_size_ratio))
+    for _ in range(holes):
+        cut_w = random.randint(1, max_cut_w)
+        cut_h = random.randint(1, max_cut_h)
+        left = random.randint(0, max(0, width - cut_w))
+        top = random.randint(0, max(0, height - cut_h))
+        draw.rectangle((left, top, left + cut_w, top + cut_h), fill=fill)
     return image
 
 
@@ -170,8 +242,27 @@ class DetectionTransform:
     hflip_prob: float = 0.5
     crop_prob: float = 0.25
     color_jitter_prob: float = 0.8
+    scale_translate_prob: float = 0.35
+    grayscale_prob: float = 0.08
+    blur_prob: float = 0.10
+    cutout_prob: float = 0.15
+    focus_label_indices: tuple[int, ...] = ()
+    focus_aug_boost: float = 1.5
     mean: tuple[float, float, float] = IMAGENET_MEAN
     std: tuple[float, float, float] = IMAGENET_STD
+
+    def _boosted_prob(self, probability: float, labels: torch.Tensor) -> float:
+        if not self.focus_label_indices or labels.numel() == 0:
+            return probability
+        focus_labels = torch.tensor(
+            self.focus_label_indices,
+            dtype=labels.dtype,
+            device=labels.device,
+        )
+        has_focus_label = torch.isin(labels, focus_labels).any().item()
+        if not has_focus_label:
+            return probability
+        return min(1.0, probability * self.focus_aug_boost)
 
     def __call__(
         self,
@@ -183,12 +274,20 @@ class DetectionTransform:
         boxes, labels = sanitize_boxes(boxes, labels, *image.size)
 
         if self.train:
-            if random.random() < self.crop_prob:
+            if random.random() < self._boosted_prob(self.scale_translate_prob, labels):
+                image, boxes, labels = random_scale_translate(image, boxes, labels)
+            if random.random() < self._boosted_prob(self.crop_prob, labels):
                 image, boxes, labels = random_crop(image, boxes, labels)
             if random.random() < self.hflip_prob:
                 image, boxes, labels = horizontal_flip(image, boxes, labels)
-            if random.random() < self.color_jitter_prob:
+            if random.random() < self._boosted_prob(self.color_jitter_prob, labels):
                 image = random_color_jitter(image)
+            if random.random() < self._boosted_prob(self.grayscale_prob, labels):
+                image = random_grayscale(image)
+            if random.random() < self._boosted_prob(self.blur_prob, labels):
+                image = random_blur(image)
+            if random.random() < self._boosted_prob(self.cutout_prob, labels):
+                image = random_cutout(image)
 
         image, boxes, scale, pad = letterbox_resize(image, boxes, self.image_size)
         boxes, labels = sanitize_boxes(boxes, labels, self.image_size, self.image_size)

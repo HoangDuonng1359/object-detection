@@ -238,6 +238,24 @@ or:
 
 By default, `best.pth` is selected using validation `mAP@0.5`.
 
+## Training Augmentation
+
+Training uses box-aware augmentation in `utils/augmentation.py`:
+
+```text
+random scale/translate
+random crop
+horizontal flip
+color jitter
+random grayscale
+Gaussian blur
+small cutout
+letterbox resize
+ImageNet normalization
+```
+
+Images containing `chair` get a small augmentation probability boost for the scale, crop, color, grayscale, blur, and cutout transforms. Validation and prediction only use letterbox resize plus normalization.
+
 ## Train
 
 The required training command is supported:
