@@ -1,6 +1,6 @@
 # Object Detection YOLO-Lite
 
-This project implements an object detector from scratch with PyTorch. The model uses a pretrained ResNet50 feature extractor, a custom FPN/PAN neck, a decoupled anchor-free detection head, a custom detection loss, and per-class NMS during inference.
+This project implements an object detector from scratch with PyTorch. The model uses a pretrained ResNet50 feature extractor, a custom BiFPN neck, a decoupled anchor-free detection head, a custom detection loss, and per-class NMS during inference.
 
 ## Setup
 
@@ -35,7 +35,7 @@ The detector is implemented as a small anchor-free YOLO-style model. It does not
 Input image
   -> Letterbox resize + ImageNet normalization
   -> ResNet50 backbone
-  -> 3-scale weighted FPN + PAN neck
+  -> 3-scale BiFPN neck
   -> Decoupled anchor-free detection heads
   -> Decode boxes + confidence filtering + per-class NMS
   -> predictions.json
@@ -67,38 +67,34 @@ The model uses three detection scales to reduce memory use while still covering 
 
 File: `models/neck.py`
 
-The neck is a custom weighted FPN + PAN module named `SimpleFPN`.
+The neck is a custom 3-scale BiFPN module named `BiFPN`.
 
 Feature fusion points use learnable non-negative weights instead of plain addition:
 
 ```text
-fused = (w1 * feature_a + w2 * feature_b) / (w1 + w2 + eps)
+fused = (w1 * feature_a + ... + wn * feature_n) / (w1 + ... + wn + eps)
 ```
 
-The weights are initialized equally, then learned during training. This lets the model decide how much to trust each top-down or bottom-up feature path.
+The weights are initialized equally, then learned during training. This lets the model decide how much to trust each input path at every BiFPN node.
 
-First, a top-down FPN path fuses semantic information from deep layers into shallow layers:
-
-```text
-C5 -> P5
-weighted(C4, upsample(P5)) -> P4
-weighted(C3, upsample(P4)) -> P3
-```
-
-Then, a bottom-up PAN path sends localization-rich low-level information back to deeper scales:
+After 1x1 lateral projection, the BiFPN repeats bidirectional fusion blocks:
 
 ```text
-N3 = P3
-weighted(P4, downsample(N3)) -> N4
-weighted(P5, downsample(N4)) -> N5
+Top-down:
+weighted(P4_in, upsample(P5_in)) -> P4_td
+weighted(P3_in, upsample(P4_td)) -> P3_out
+
+Bottom-up:
+weighted(P4_in, P4_td, downsample(P3_out)) -> P4_out
+weighted(P5_in, downsample(P4_out)) -> P5_out
 ```
 
 Every neck output has 256 channels:
 
 ```text
-N3: stride 8
-N4: stride 16
-N5: stride 32
+P3: stride 8
+P4: stride 16
+P5: stride 32
 ```
 
 For `IMAGE_SIZE = 512`, the prediction feature shapes are:
@@ -117,29 +113,30 @@ The head is anchor-free and decoupled. Each scale has two separate towers:
 
 ```text
 feature
-  -> box tower   -> bbox + objectness
+  -> box tower   -> ltrb distribution + objectness
   -> class tower -> class logits
 ```
 
 Each scale outputs:
 
 ```text
-[tx, ty, tw, th, objectness, class_logits...]
+[left_distribution, top_distribution, right_distribution, bottom_distribution,
+ objectness, class_logits...]
 ```
 
-For 5 classes, each output tensor has:
+With `reg_max = 16` and 5 classes, each output tensor has:
 
 ```text
-5 + num_classes = 10 channels
+4 * (reg_max + 1) + 1 + num_classes = 74 channels
 ```
 
 The full model output is a list of three tensors, one per stride:
 
 ```text
 [
-  B x 10 x H/8  x W/8,
-  B x 10 x H/16 x W/16,
-  B x 10 x H/32 x W/32,
+  B x 74 x H/8  x W/8,
+  B x 74 x H/16 x W/16,
+  B x 74 x H/32 x W/32,
 ]
 ```
 
@@ -147,16 +144,21 @@ The full model output is a list of three tensors, one per stride:
 
 File: `utils/loss.py`
 
-Predicted boxes are decoded per grid cell:
+Predicted boxes are decoded as YOLOv8-style distributional distances from each
+grid point to the four box sides:
 
 ```text
-center_x = (sigmoid(tx) + grid_x) * stride
-center_y = (sigmoid(ty) + grid_y) * stride
-box_w    = exp(tw) * stride
-box_h    = exp(th) * stride
+distance = expectation(softmax(distribution_bins)) * stride
+point_x  = (grid_x + 0.5) * stride
+point_y  = (grid_y + 0.5) * stride
+
+xmin = point_x - left
+ymin = point_y - top
+xmax = point_x + right
+ymax = point_y + bottom
 ```
 
-The decoded box is converted to:
+The decoded box is:
 
 ```text
 [xmin, ymin, xmax, ymax]
@@ -178,11 +180,12 @@ Positive grid cells are chosen around the object center using a small center rad
 
 File: `utils/loss.py`
 
-The training loss has three parts:
+The training loss has four parts:
 
 ```text
 total_loss =
   5.0 * box_loss
+  + 1.0 * dfl_loss
   + 1.0 * objectness_loss
   + 0.5 * class_loss
 ```
@@ -191,6 +194,7 @@ Where:
 
 ```text
 box_loss        = 1 - CIoU
+dfl_loss        = distribution focal loss for l/t/r/b distances
 objectness_loss = focal BCE with logits
 class_loss      = cross entropy
 ```
@@ -224,19 +228,17 @@ Classes not listed in `--class_thresholds` use `--conf_threshold`.
 
 ### Checkpoint Selection
 
-During training, `models/best.pth` can be selected by either validation mAP or validation loss:
+Training saves multiple best checkpoints automatically:
 
-```bash
---best_metric map50
+```text
+best_map50.pth     best validation mAP@0.5
+best_val_loss.pth  lowest validation loss
+best_f1.pth        best validation micro F1
+best.pth           compatibility alias for best_map50.pth
+last.pth           most recent epoch
 ```
 
-or:
-
-```bash
---best_metric val_loss
-```
-
-By default, `best.pth` is selected using validation `mAP@0.5`.
+No `--best_metric` argument is needed.
 
 ## Training Augmentation
 
@@ -345,4 +347,4 @@ Put trained weights at:
 models/best.pth
 ```
 
-The checkpoint stores the class list, image size, strides, architecture name, model weights, optimizer state, and best validation mAP.
+The checkpoint stores the class list, image size, strides, architecture name, model weights, optimizer state, the checkpoint metric, its value, and the best mAP/loss/F1 summary.

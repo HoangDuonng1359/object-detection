@@ -53,12 +53,14 @@ def load_model(
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     classes = list(checkpoint.get("classes", DEFAULT_CLASSES))
     strides = tuple(int(stride) for stride in checkpoint.get("strides", DEFAULT_STRIDES))
+    reg_max = int(checkpoint.get("reg_max", 16))
     image_size = int(checkpoint.get("image_size", 416))
 
     model = YoloLite(
         num_classes=len(classes),
         pretrained_backbone=False,
         strides=strides,
+        reg_max=reg_max,
     ).to(device)
     state = checkpoint.get("model_state", checkpoint)
     model.load_state_dict(state)
@@ -149,8 +151,11 @@ def decode_predictions(
             criterion.strides[scale_index],
         )
         boxes = decoded.permute(0, 2, 3, 1).reshape(batch_size, -1, 4)
-        objectness = torch.sigmoid(prediction[:, 4]).reshape(batch_size, -1)
-        class_probs = torch.softmax(prediction[:, 5:], dim=1)
+        objectness = torch.sigmoid(prediction[:, criterion.objectness_index]).reshape(
+            batch_size,
+            -1,
+        )
+        class_probs = torch.softmax(prediction[:, criterion.class_start_index :], dim=1)
         class_scores, class_labels = class_probs.permute(0, 2, 3, 1).reshape(
             batch_size,
             -1,
@@ -262,6 +267,7 @@ def predict(args: argparse.Namespace) -> list[dict[str, Any]]:
     criterion = YoloDetectionLoss(
         strides=model.strides,
         num_classes=len(classes),
+        reg_max=model.reg_max,
     ).to(device)
 
     image_paths = list_images(args.image_dir)

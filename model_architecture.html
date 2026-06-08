@@ -174,7 +174,7 @@
 </head>
 <body>
   <header>
-    <h1>YOLO-Lite: ResNet50 + 3-Scale Weighted PAN + Anchor-Free Head</h1>
+    <h1>YOLO-Lite: ResNet50 + 3-Scale BiFPN + Anchor-Free Head</h1>
     <p>
       Kiến trúc hiện tại đã bỏ P2 stride 4 để giảm VRAM và tăng tốc.
       Model còn 3 scale dự đoán: stride 8, 16, 32.
@@ -212,20 +212,20 @@
           <path class="arrow" d="M380 145 H430"></path>
 
           <rect class="box neck" x="430" y="55" width="210" height="180"></rect>
-          <text class="text-main" x="535" y="86" text-anchor="middle">Weighted FPN + PAN Neck</text>
+          <text class="text-main" x="535" y="86" text-anchor="middle">BiFPN Neck</text>
           <text class="text-sub" x="535" y="113" text-anchor="middle">learnable weighted fusion</text>
-          <text class="text-sub" x="535" y="136" text-anchor="middle">top-down + bottom-up paths</text>
-          <text class="text-sub" x="535" y="171" text-anchor="middle">N3, N4, N5</text>
+          <text class="text-sub" x="535" y="136" text-anchor="middle">repeated bidirectional blocks</text>
+          <text class="text-sub" x="535" y="171" text-anchor="middle">P3, P4, P5</text>
           <text class="text-sub" x="535" y="196" text-anchor="middle">256 channels each</text>
 
           <path class="arrow" d="M640 145 H690"></path>
 
           <rect class="box head" x="690" y="55" width="190" height="180"></rect>
           <text class="text-main" x="785" y="86" text-anchor="middle">Decoupled Head</text>
-          <text class="text-sub" x="785" y="118" text-anchor="middle">box tower</text>
+          <text class="text-sub" x="785" y="118" text-anchor="middle">DFL box tower</text>
           <text class="text-sub" x="785" y="141" text-anchor="middle">objectness</text>
           <text class="text-sub" x="785" y="164" text-anchor="middle">class tower</text>
-          <text class="text-sub" x="785" y="198" text-anchor="middle">10 channels/scale</text>
+          <text class="text-sub" x="785" y="198" text-anchor="middle">74 channels/scale</text>
 
           <path class="arrow" d="M880 145 H930"></path>
 
@@ -247,7 +247,7 @@
       </p>
 
       <div class="diagram-wrap">
-        <svg width="980" height="340" viewBox="0 0 980 340" role="img" aria-label="Three scale FPN PAN diagram">
+        <svg width="980" height="340" viewBox="0 0 980 340" role="img" aria-label="Three scale BiFPN diagram">
           <defs>
             <marker id="arrow2" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
               <path d="M0,0 L0,6 L9,3 z" fill="#475569"></path>
@@ -272,22 +272,22 @@
 
           <rect class="box neck" x="310" y="135" width="130" height="55"></rect>
           <text class="text-main" x="375" y="168" text-anchor="middle">P4</text>
-          <text class="text-sub" x="375" y="185" text-anchor="middle">weighted(C4, up(P5))</text>
+          <text class="text-sub" x="375" y="185" text-anchor="middle">weighted + conv</text>
 
           <rect class="box neck" x="310" y="225" width="130" height="55"></rect>
           <text class="text-main" x="375" y="258" text-anchor="middle">P3</text>
-          <text class="text-sub" x="375" y="275" text-anchor="middle">weighted(C3, up(P4))</text>
+          <text class="text-sub" x="375" y="275" text-anchor="middle">weighted + conv</text>
 
           <rect class="box head" x="650" y="45" width="145" height="55"></rect>
-          <text class="text-main" x="722" y="78" text-anchor="middle">N5</text>
+          <text class="text-main" x="722" y="78" text-anchor="middle">P5</text>
           <text class="text-sub" x="722" y="95" text-anchor="middle">stride 32</text>
 
           <rect class="box head" x="650" y="135" width="145" height="55"></rect>
-          <text class="text-main" x="722" y="168" text-anchor="middle">N4</text>
+          <text class="text-main" x="722" y="168" text-anchor="middle">P4</text>
           <text class="text-sub" x="722" y="185" text-anchor="middle">stride 16</text>
 
           <rect class="box head" x="650" y="225" width="145" height="55"></rect>
-          <text class="text-main" x="722" y="258" text-anchor="middle">N3</text>
+          <text class="text-main" x="722" y="258" text-anchor="middle">P3</text>
           <text class="text-sub" x="722" y="275" text-anchor="middle">stride 8</text>
 
           <path class="arrow" d="M180 72 H310"></path>
@@ -317,19 +317,19 @@
         </thead>
         <tbody>
           <tr>
-            <td>N3</td>
+            <td>P3</td>
             <td>8</td>
             <td>64 x 64</td>
             <td>Object nhỏ đến vừa.</td>
           </tr>
           <tr>
-            <td>N4</td>
+            <td>P4</td>
             <td>16</td>
             <td>32 x 32</td>
             <td>Object vừa đến lớn.</td>
           </tr>
           <tr>
-            <td>N5</td>
+            <td>P5</td>
             <td>32</td>
             <td>16 x 16</td>
             <td>Object lớn, ngữ nghĩa mạnh.</td>
@@ -343,7 +343,7 @@
       <div class="grid">
         <div class="mini-card">
           <strong>Box tower</strong>
-          Dự đoán <code>tx, ty, tw, th</code> để decode thành bbox.
+          Dự đoán DFL distributions cho <code>left, top, right, bottom</code>.
         </div>
         <div class="mini-card">
           <strong>Objectness</strong>
@@ -361,24 +361,23 @@
 
       <pre><code>Output for IMAGE_SIZE = 512:
 [
-  B x 10 x 64 x 64,  # stride 8
-  B x 10 x 32 x 32,  # stride 16
-  B x 10 x 16 x 16,  # stride 32
+  B x 74 x 64 x 64,  # stride 8
+  B x 74 x 32 x 32,  # stride 16
+  B x 74 x 16 x 16,  # stride 32
 ]</code></pre>
     </section>
 
     <section>
       <h2>4. Box Decoding</h2>
-      <pre><code>center_x = (sigmoid(tx) + grid_x) * stride
-center_y = (sigmoid(ty) + grid_y) * stride
-box_w    = exp(tw) * stride
-box_h    = exp(th) * stride
+      <pre><code>distance = expectation(softmax(distribution_bins)) * stride
+point_x  = (grid_x + 0.5) * stride
+point_y  = (grid_y + 0.5) * stride
 
 bbox = [
-  center_x - box_w / 2,
-  center_y - box_h / 2,
-  center_x + box_w / 2,
-  center_y + box_h / 2,
+  point_x - left,
+  point_y - top,
+  point_x + right,
+  point_y + bottom,
 ]</code></pre>
     </section>
 
@@ -397,6 +396,11 @@ bbox = [
             <td>Box loss</td>
             <td><code>1 - CIoU</code></td>
             <td>5.0</td>
+          </tr>
+          <tr>
+            <td>DFL loss</td>
+            <td>Distribution focal loss for l/t/r/b</td>
+            <td>1.0</td>
           </tr>
           <tr>
             <td>Objectness loss</td>
@@ -453,7 +457,7 @@ bbox = [
           </tr>
           <tr>
             <th>Neck</th>
-            <td>Custom weighted FPN + PAN, 3 scale, 256 channels.</td>
+            <td>Custom BiFPN, 3 scale, 256 channels.</td>
           </tr>
           <tr>
             <th>Head</th>
@@ -465,7 +469,7 @@ bbox = [
           </tr>
           <tr>
             <th>Output channels</th>
-            <td>10 per scale = 4 bbox + 1 objectness + 5 class logits.</td>
+            <td>74 per scale = 4 * 17 DFL bins + 1 objectness + 5 class logits.</td>
           </tr>
           <tr>
             <th>Lợi ích sau khi bỏ P2</th>

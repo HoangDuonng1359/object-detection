@@ -78,6 +78,33 @@ def focal_bce_with_logits(
     return alpha_t * (1.0 - p_t).pow(gamma) * bce
 
 
+def distribution_focal_loss(
+    pred_logits: torch.Tensor,
+    targets: torch.Tensor,
+    reg_max: int,
+) -> torch.Tensor:
+    """DFL for l/t/r/b distributions.
+
+    pred_logits: [N, 4, reg_max + 1]
+    targets: [N, 4], continuous distances in feature-grid units.
+    """
+    targets = targets.clamp(min=0.0, max=float(reg_max) - 1e-3)
+    left = targets.floor().long()
+    right = (left + 1).clamp(max=reg_max)
+    weight_right = targets - left.float()
+    weight_left = 1.0 - weight_right
+
+    logits = pred_logits.reshape(-1, reg_max + 1)
+    left = left.reshape(-1)
+    right = right.reshape(-1)
+    weight_left = weight_left.reshape(-1)
+    weight_right = weight_right.reshape(-1)
+
+    loss_left = F.cross_entropy(logits, left, reduction="none") * weight_left
+    loss_right = F.cross_entropy(logits, right, reduction="none") * weight_right
+    return (loss_left + loss_right).view(-1, 4).sum(dim=1)
+
+
 @dataclass
 class LossTargets:
     objectness: list[torch.Tensor]
@@ -92,6 +119,7 @@ class YoloDetectionLoss(nn.Module):
         strides: tuple[int, ...],
         num_classes: int = 5,
         box_weight: float = 5.0,
+        dfl_weight: float = 1.0,
         objectness_weight: float = 1.0,
         class_weight: float = 0.5,
         focal_alpha: float = 0.25,
@@ -99,11 +127,13 @@ class YoloDetectionLoss(nn.Module):
         center_radius: int = 1,
         small_object_max_side: float = 64.0,
         medium_object_max_side: float = 160.0,
+        reg_max: int = 16,
     ) -> None:
         super().__init__()
         self.num_classes = num_classes
         self.strides = tuple(int(stride) for stride in strides)
         self.box_weight = box_weight
+        self.dfl_weight = dfl_weight
         self.objectness_weight = objectness_weight
         self.class_weight = class_weight
         self.focal_alpha = focal_alpha
@@ -111,6 +141,16 @@ class YoloDetectionLoss(nn.Module):
         self.center_radius = center_radius
         self.small_object_max_side = small_object_max_side
         self.medium_object_max_side = medium_object_max_side
+        self.reg_max = int(reg_max)
+        self.reg_bins = self.reg_max + 1
+        self.box_channels = 4 * self.reg_bins
+        self.objectness_index = self.box_channels
+        self.class_start_index = self.objectness_index + 1
+        self.register_buffer(
+            "dfl_projection",
+            torch.arange(self.reg_bins, dtype=torch.float32),
+            persistent=False,
+        )
 
     def choose_scale(self, width: torch.Tensor, height: torch.Tensor) -> int:
         max_side = float(torch.maximum(width, height).item())
@@ -129,7 +169,7 @@ class YoloDetectionLoss(nn.Module):
         return len(self.strides) - 1
 
     def decode_boxes(self, prediction: torch.Tensor, stride: int) -> torch.Tensor:
-        _, _, height, width = prediction.shape
+        batch_size, _, height, width = prediction.shape
         device = prediction.device
         grid_y, grid_x = torch.meshgrid(
             torch.arange(height, device=device),
@@ -139,18 +179,72 @@ class YoloDetectionLoss(nn.Module):
         grid_x = grid_x.view(1, height, width).float()
         grid_y = grid_y.view(1, height, width).float()
 
-        center_x = (torch.sigmoid(prediction[:, 0]) + grid_x) * stride
-        center_y = (torch.sigmoid(prediction[:, 1]) + grid_y) * stride
-        box_w = prediction[:, 2].clamp(min=-6.0, max=6.0).exp() * stride
-        box_h = prediction[:, 3].clamp(min=-6.0, max=6.0).exp() * stride
+        box_logits = prediction[:, : self.box_channels].view(
+            batch_size,
+            4,
+            self.reg_bins,
+            height,
+            width,
+        )
+        distances = (
+            box_logits.softmax(dim=2)
+            * self.dfl_projection.view(1, 1, self.reg_bins, 1, 1)
+        ).sum(dim=2) * stride
+
+        left = distances[:, 0]
+        top = distances[:, 1]
+        right = distances[:, 2]
+        bottom = distances[:, 3]
+        point_x = (grid_x + 0.5) * stride
+        point_y = (grid_y + 0.5) * stride
         return torch.stack(
             (
-                center_x - box_w * 0.5,
-                center_y - box_h * 0.5,
-                center_x + box_w * 0.5,
-                center_y + box_h * 0.5,
+                point_x - left,
+                point_y - top,
+                point_x + right,
+                point_y + bottom,
             ),
             dim=1,
+        )
+
+    def encode_ltrb_targets(
+        self,
+        target_boxes: torch.Tensor,
+        positive_mask: torch.Tensor,
+        stride: int,
+    ) -> torch.Tensor:
+        batch_size, _, height, width = target_boxes.shape
+        device = target_boxes.device
+        grid_y, grid_x = torch.meshgrid(
+            torch.arange(height, device=device),
+            torch.arange(width, device=device),
+            indexing="ij",
+        )
+        point_x = ((grid_x.float() + 0.5) * stride).view(1, height, width).expand(
+            batch_size,
+            height,
+            width,
+        )
+        point_y = ((grid_y.float() + 0.5) * stride).view(1, height, width).expand(
+            batch_size,
+            height,
+            width,
+        )
+        boxes = target_boxes.permute(0, 2, 3, 1)[positive_mask]
+        points_x = point_x[positive_mask]
+        points_y = point_y[positive_mask]
+        distances = torch.stack(
+            (
+                points_x - boxes[:, 0],
+                points_y - boxes[:, 1],
+                boxes[:, 2] - points_x,
+                boxes[:, 3] - points_y,
+            ),
+            dim=1,
+        )
+        return (distances / float(stride)).clamp(
+            min=0.0,
+            max=float(self.reg_max) - 1e-3,
         )
 
     def build_targets(
@@ -236,11 +330,12 @@ class YoloDetectionLoss(nn.Module):
         device = predictions[0].device
         objectness_loss_sum = torch.zeros((), device=device)
         box_loss_sum = torch.zeros((), device=device)
+        dfl_loss_sum = torch.zeros((), device=device)
         class_loss_sum = torch.zeros((), device=device)
         positive_count = torch.zeros((), device=device)
 
         for scale_index, prediction in enumerate(predictions):
-            objectness_logits = prediction[:, 4]
+            objectness_logits = prediction[:, self.objectness_index]
             objectness_targets = loss_targets.objectness[scale_index]
             objectness_loss_sum = objectness_loss_sum + focal_bce_with_logits(
                 objectness_logits,
@@ -260,7 +355,26 @@ class YoloDetectionLoss(nn.Module):
             target_boxes = loss_targets.boxes[scale_index].permute(0, 2, 3, 1)[positive_mask]
             box_loss_sum = box_loss_sum + (1.0 - bbox_ciou(predicted_boxes, target_boxes)).sum()
 
-            class_logits = prediction[:, 5:].permute(0, 2, 3, 1)[positive_mask]
+            box_logits = prediction[:, : self.box_channels].view(
+                prediction.shape[0],
+                4,
+                self.reg_bins,
+                prediction.shape[2],
+                prediction.shape[3],
+            )
+            box_logits = box_logits.permute(0, 3, 4, 1, 2)[positive_mask]
+            target_ltrb = self.encode_ltrb_targets(
+                loss_targets.boxes[scale_index],
+                positive_mask,
+                self.strides[scale_index],
+            )
+            dfl_loss_sum = dfl_loss_sum + distribution_focal_loss(
+                box_logits,
+                target_ltrb,
+                self.reg_max,
+            ).sum()
+
+            class_logits = prediction[:, self.class_start_index :].permute(0, 2, 3, 1)[positive_mask]
             class_targets = loss_targets.classes[scale_index][positive_mask]
             class_loss_sum = class_loss_sum + F.cross_entropy(
                 class_logits,
@@ -270,16 +384,19 @@ class YoloDetectionLoss(nn.Module):
 
         normalizer = positive_count.clamp(min=1.0)
         box_loss = box_loss_sum / normalizer
+        dfl_loss = dfl_loss_sum / normalizer
         objectness_loss = objectness_loss_sum / normalizer
         class_loss = class_loss_sum / normalizer
         total_loss = (
             self.box_weight * box_loss
+            + self.dfl_weight * dfl_loss
             + self.objectness_weight * objectness_loss
             + self.class_weight * class_loss
         )
         return {
             "loss": total_loss,
             "box_loss": box_loss.detach(),
+            "dfl_loss": dfl_loss.detach(),
             "objectness_loss": objectness_loss.detach(),
             "class_loss": class_loss.detach(),
             "num_positive": positive_count.detach(),

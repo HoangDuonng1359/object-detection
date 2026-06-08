@@ -39,6 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--warmup_epochs", type=int, default=3)
     parser.add_argument("--grad_clip", type=float, default=10.0)
+    parser.add_argument("--reg_max", type=int, default=16)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--oversample_classes",
@@ -56,7 +57,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pretrained_backbone", action="store_true")
     parser.add_argument("--freeze_backbone_stem", action="store_true")
     parser.add_argument("--amp", action="store_true")
-    parser.add_argument("--disable_multi_gpu", action="store_true")
     parser.add_argument(
         "--disable_tqdm",
         action="store_true",
@@ -76,12 +76,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--nms_threshold", type=float, default=0.45)
     parser.add_argument("--max_detections", type=int, default=100)
-    parser.add_argument(
-        "--best_metric",
-        choices=("map50", "val_loss"),
-        default="map50",
-        help="Metric used to choose best.pth.",
-    )
     parser.add_argument(
         "--max_val_batches",
         type=int,
@@ -114,10 +108,6 @@ def move_targets_to_device(
             item[key] = value.to(device, non_blocking=True) if torch.is_tensor(value) else value
         moved.append(item)
     return moved
-
-
-def unwrap_model(model: nn.Module) -> nn.Module:
-    return model.module if isinstance(model, nn.DataParallel) else model
 
 
 def bbox_iou(box: torch.Tensor, boxes: torch.Tensor) -> torch.Tensor:
@@ -171,8 +161,11 @@ def decode_batch_predictions(
             criterion.strides[scale_index],
         )
         boxes = decoded_boxes.permute(0, 2, 3, 1).reshape(batch_size, -1, 4)
-        objectness = torch.sigmoid(prediction[:, 4]).reshape(batch_size, -1)
-        class_probs = torch.softmax(prediction[:, 5:], dim=1)
+        objectness = torch.sigmoid(prediction[:, criterion.objectness_index]).reshape(
+            batch_size,
+            -1,
+        )
+        class_probs = torch.softmax(prediction[:, criterion.class_start_index :], dim=1)
         class_scores, class_labels = class_probs.permute(0, 2, 3, 1).reshape(
             batch_size,
             -1,
@@ -323,6 +316,92 @@ def compute_map_50(
     return sum(aps) / len(aps) if aps else 0.0
 
 
+def compute_detection_metrics(
+    predictions: list[dict[str, Any]],
+    ground_truths: list[dict[str, Any]],
+    num_classes: int,
+    iou_threshold: float = 0.5,
+) -> dict[str, float]:
+    total_tp = 0
+    total_fp = 0
+    total_gt = 0
+    class_f1_scores = []
+
+    for class_index in range(num_classes):
+        gt_by_image: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        num_gt = 0
+        for gt in ground_truths:
+            boxes = gt["boxes"]
+            labels = gt["labels"]
+            class_mask = labels == class_index
+            for box in boxes[class_mask]:
+                gt_by_image[gt["image_id"]].append({"bbox": box, "matched": False})
+                num_gt += 1
+
+        class_predictions = []
+        for pred in predictions:
+            labels = pred["labels"]
+            class_mask = labels == class_index
+            for box, score in zip(pred["boxes"][class_mask], pred["scores"][class_mask]):
+                class_predictions.append(
+                    {
+                        "image_id": pred["image_id"],
+                        "bbox": box,
+                        "score": float(score),
+                    }
+                )
+        class_predictions.sort(key=lambda item: item["score"], reverse=True)
+
+        tp = 0
+        fp = 0
+        for pred in class_predictions:
+            candidates = gt_by_image.get(pred["image_id"], [])
+            best_iou = 0.0
+            best_index = -1
+            for index, gt in enumerate(candidates):
+                if gt["matched"]:
+                    continue
+                iou = float(bbox_iou(pred["bbox"], gt["bbox"].unsqueeze(0))[0])
+                if iou > best_iou:
+                    best_iou = iou
+                    best_index = index
+
+            if best_index >= 0 and best_iou >= iou_threshold:
+                candidates[best_index]["matched"] = True
+                tp += 1
+            else:
+                fp += 1
+
+        precision = tp / max(tp + fp, 1)
+        recall = tp / max(num_gt, 1)
+        f1 = (
+            2.0 * precision * recall / max(precision + recall, 1e-12)
+            if num_gt > 0
+            else 0.0
+        )
+        if num_gt > 0:
+            class_f1_scores.append(f1)
+
+        total_tp += tp
+        total_fp += fp
+        total_gt += num_gt
+
+    micro_precision = total_tp / max(total_tp + total_fp, 1)
+    micro_recall = total_tp / max(total_gt, 1)
+    micro_f1 = (
+        2.0 * micro_precision * micro_recall / max(micro_precision + micro_recall, 1e-12)
+        if total_gt > 0
+        else 0.0
+    )
+    macro_f1 = sum(class_f1_scores) / len(class_f1_scores) if class_f1_scores else 0.0
+    return {
+        "micro_precision": micro_precision,
+        "micro_recall": micro_recall,
+        "micro_f1": micro_f1,
+        "macro_f1": macro_f1,
+    }
+
+
 def make_scheduler(optimizer: torch.optim.Optimizer, epochs: int, warmup_epochs: int) -> LambdaLR:
     def lr_lambda(epoch: int) -> float:
         if warmup_epochs > 0 and epoch < warmup_epochs:
@@ -395,6 +474,7 @@ def train_one_epoch(
             progress.set_postfix(
                 loss=f"{totals['loss'] / steps:.4f}",
                 box=f"{totals['box_loss'] / steps:.4f}",
+                dfl=f"{totals['dfl_loss'] / steps:.4f}",
                 obj=f"{totals['objectness_loss'] / steps:.4f}",
                 cls=f"{totals['class_loss'] / steps:.4f}",
             )
@@ -480,6 +560,13 @@ def validate(
         all_ground_truths,
         num_classes=len(DEFAULT_CLASSES),
     )
+    metrics.update(
+        compute_detection_metrics(
+            all_predictions,
+            all_ground_truths,
+            num_classes=len(DEFAULT_CLASSES),
+        )
+    )
     return metrics
 
 
@@ -488,7 +575,9 @@ def save_checkpoint(
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
     epoch: int,
-    best_map: float,
+    metric_name: str,
+    metric_value: float,
+    best_metrics: dict[str, float],
     args: argparse.Namespace,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -496,18 +585,18 @@ def save_checkpoint(
         key: str(value) if isinstance(value, Path) else value
         for key, value in vars(args).items()
     }
-    raw_model = unwrap_model(model)
     checkpoint = {
-        "model_state": raw_model.state_dict(),
+        "model_state": model.state_dict(),
         "optimizer_state": optimizer.state_dict(),
         "epoch": epoch,
         "classes": list(DEFAULT_CLASSES),
-        "architecture": "anchor_free_decoupled_yolo_lite_resnet50_weighted_pan",
-        "strides": list(raw_model.strides),
+        "architecture": "anchor_free_decoupled_yolo_lite_resnet50_bifpn_dfl",
+        "strides": list(model.strides),
+        "reg_max": model.reg_max,
         "image_size": args.image_size,
-        "best_map": best_map,
-        "best_metric": args.best_metric,
-        "data_parallel": isinstance(model, nn.DataParallel),
+        "checkpoint_metric": metric_name,
+        "checkpoint_metric_value": metric_value,
+        "best_metrics": best_metrics,
         "args": serializable_args,
     }
     torch.save(checkpoint, path)
@@ -520,6 +609,8 @@ def append_history(
     train_metrics: dict[str, float],
     val_metrics: dict[str, float],
     best_map: float,
+    best_val_loss: float,
+    best_f1: float,
     args: argparse.Namespace,
     run_started_at: str,
     train_seconds: float,
@@ -542,34 +633,41 @@ def append_history(
         "lr",
         "weight_decay",
         "warmup_epochs",
+        "reg_max",
         "oversample_classes",
         "oversample_factor",
         "pretrained_backbone",
         "freeze_backbone_stem",
         "amp",
-        "disable_multi_gpu",
         "disable_tqdm",
         "conf_threshold",
         "class_thresholds",
         "nms_threshold",
         "max_detections",
-        "best_metric",
         "seed",
         "train_seconds",
         "val_seconds",
         "epoch_seconds",
         "train_loss",
         "train_box_loss",
+        "train_dfl_loss",
         "train_objectness_loss",
         "train_class_loss",
         "train_num_positive",
         "val_loss",
         "val_box_loss",
+        "val_dfl_loss",
         "val_objectness_loss",
         "val_class_loss",
         "val_num_positive",
         "val_map50",
+        "val_micro_precision",
+        "val_micro_recall",
+        "val_micro_f1",
+        "val_macro_f1",
         "best_map50",
+        "best_val_loss",
+        "best_micro_f1",
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
     write_header = reset_file or not path.exists()
@@ -590,34 +688,41 @@ def append_history(
         "lr": lr,
         "weight_decay": args.weight_decay,
         "warmup_epochs": args.warmup_epochs,
+        "reg_max": args.reg_max,
         "oversample_classes": " ".join(args.oversample_classes),
         "oversample_factor": args.oversample_factor,
         "pretrained_backbone": args.pretrained_backbone,
         "freeze_backbone_stem": args.freeze_backbone_stem,
         "amp": args.amp,
-        "disable_multi_gpu": args.disable_multi_gpu,
         "disable_tqdm": args.disable_tqdm or args.no_progress,
         "conf_threshold": args.conf_threshold,
         "class_thresholds": args.class_thresholds,
         "nms_threshold": args.nms_threshold,
         "max_detections": args.max_detections,
-        "best_metric": args.best_metric,
         "seed": args.seed,
         "train_seconds": f"{train_seconds:.2f}",
         "val_seconds": f"{val_seconds:.2f}",
         "epoch_seconds": f"{epoch_seconds:.2f}",
         "train_loss": train_metrics.get("loss", 0.0),
         "train_box_loss": train_metrics.get("box_loss", 0.0),
+        "train_dfl_loss": train_metrics.get("dfl_loss", 0.0),
         "train_objectness_loss": train_metrics.get("objectness_loss", 0.0),
         "train_class_loss": train_metrics.get("class_loss", 0.0),
         "train_num_positive": train_metrics.get("num_positive", 0.0),
         "val_loss": val_metrics.get("loss", 0.0),
         "val_box_loss": val_metrics.get("box_loss", 0.0),
+        "val_dfl_loss": val_metrics.get("dfl_loss", 0.0),
         "val_objectness_loss": val_metrics.get("objectness_loss", 0.0),
         "val_class_loss": val_metrics.get("class_loss", 0.0),
         "val_num_positive": val_metrics.get("num_positive", 0.0),
         "val_map50": val_metrics.get("mAP@0.5", 0.0),
+        "val_micro_precision": val_metrics.get("micro_precision", 0.0),
+        "val_micro_recall": val_metrics.get("micro_recall", 0.0),
+        "val_micro_f1": val_metrics.get("micro_f1", 0.0),
+        "val_macro_f1": val_metrics.get("macro_f1", 0.0),
         "best_map50": best_map,
+        "best_val_loss": best_val_loss,
+        "best_micro_f1": best_f1,
     }
 
     with path.open(mode, newline="", encoding="utf-8") as file:
@@ -634,8 +739,7 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = args.amp and device.type == "cuda"
-    gpu_count = torch.cuda.device_count() if device.type == "cuda" else 0
-    print(f"device={device} amp={use_amp} gpu_count={gpu_count}")
+    print(f"device={device} amp={use_amp}")
 
     train_loader = make_dataloader(
         annotation_file=args.train_data,
@@ -662,22 +766,13 @@ def main() -> None:
         pretrained_backbone=args.pretrained_backbone,
         freeze_backbone_stem=args.freeze_backbone_stem,
         image_size=args.image_size,
+        reg_max=args.reg_max,
     ).to(device)
-    if gpu_count > 1 and not args.disable_multi_gpu:
-        if args.batch_size < gpu_count:
-            print(
-                f"warning: batch_size={args.batch_size} is smaller than gpu_count={gpu_count}; "
-                "some GPUs may be unused."
-            )
-        model = nn.DataParallel(model)
-        print(f"using DataParallel on {gpu_count} GPUs")
-    elif gpu_count > 1:
-        print("multi-GPU disabled; using one GPU")
 
-    raw_model = unwrap_model(model)
     criterion = YoloDetectionLoss(
-        strides=raw_model.strides,
+        strides=model.strides,
         num_classes=len(DEFAULT_CLASSES),
+        reg_max=model.reg_max,
     ).to(device)
     class_thresholds = make_class_threshold_tensor(
         DEFAULT_CLASSES,
@@ -695,7 +790,11 @@ def main() -> None:
     scheduler = make_scheduler(optimizer, args.epochs, args.warmup_epochs)
 
     best_map = -1.0
-    best_score = float("inf") if args.best_metric == "val_loss" else -1.0
+    best_val_loss = float("inf")
+    best_f1 = -1.0
+    best_map_path = args.checkpoint_dir / "best_map50.pth"
+    best_val_loss_path = args.checkpoint_dir / "best_val_loss.pth"
+    best_f1_path = args.checkpoint_dir / "best_f1.pth"
     best_path = args.checkpoint_dir / "best.pth"
     last_path = args.checkpoint_dir / "last.pth"
     started = datetime.now()
@@ -738,19 +837,78 @@ def main() -> None:
         scheduler.step()
 
         current_map = val_metrics["mAP@0.5"]
-        current_score = (
-            val_metrics["loss"] if args.best_metric == "val_loss" else current_map
-        )
-        is_best = (
-            current_score < best_score
-            if args.best_metric == "val_loss"
-            else current_score > best_score
-        )
-        if is_best:
+        current_val_loss = val_metrics["loss"]
+        current_f1 = val_metrics["micro_f1"]
+        is_best_map = current_map > best_map
+        is_best_val_loss = current_val_loss < best_val_loss
+        is_best_f1 = current_f1 > best_f1
+
+        if is_best_map:
             best_map = current_map
-            best_score = current_score
-            save_checkpoint(best_path, model, optimizer, epoch + 1, best_map, args)
-        save_checkpoint(last_path, model, optimizer, epoch + 1, best_map, args)
+        if is_best_val_loss:
+            best_val_loss = current_val_loss
+        if is_best_f1:
+            best_f1 = current_f1
+
+        best_metrics = {
+            "best_map50": best_map,
+            "best_val_loss": best_val_loss,
+            "best_micro_f1": best_f1,
+        }
+
+        if is_best_map:
+            save_checkpoint(
+                best_map_path,
+                model,
+                optimizer,
+                epoch + 1,
+                "map50",
+                current_map,
+                best_metrics,
+                args,
+            )
+            save_checkpoint(
+                best_path,
+                model,
+                optimizer,
+                epoch + 1,
+                "map50",
+                current_map,
+                best_metrics,
+                args,
+            )
+        if is_best_val_loss:
+            save_checkpoint(
+                best_val_loss_path,
+                model,
+                optimizer,
+                epoch + 1,
+                "val_loss",
+                current_val_loss,
+                best_metrics,
+                args,
+            )
+        if is_best_f1:
+            save_checkpoint(
+                best_f1_path,
+                model,
+                optimizer,
+                epoch + 1,
+                "micro_f1",
+                current_f1,
+                best_metrics,
+                args,
+            )
+        save_checkpoint(
+            last_path,
+            model,
+            optimizer,
+            epoch + 1,
+            "last",
+            current_map,
+            best_metrics,
+            args,
+        )
         epoch_seconds = time.perf_counter() - epoch_started
 
         lr = optimizer.param_groups[0]["lr"]
@@ -761,6 +919,8 @@ def main() -> None:
             train_metrics=train_metrics,
             val_metrics=val_metrics,
             best_map=best_map,
+            best_val_loss=best_val_loss,
+            best_f1=best_f1,
             args=args,
             run_started_at=run_started_at,
             train_seconds=train_seconds,
@@ -775,15 +935,22 @@ def main() -> None:
             f"val_time={format_duration(val_seconds)} "
             f"lr={lr:.6g} "
             f"train_loss={train_metrics['loss']:.4f} "
+            f"train_dfl={train_metrics.get('dfl_loss', 0.0):.4f} "
             f"val_loss={val_metrics['loss']:.4f} "
+            f"val_dfl={val_metrics.get('dfl_loss', 0.0):.4f} "
             f"val_map50={current_map:.4f} "
+            f"val_f1={current_f1:.4f} "
             f"best_map50={best_map:.4f} "
-            f"best_metric={args.best_metric}"
+            f"best_val_loss={best_val_loss:.4f} "
+            f"best_f1={best_f1:.4f}"
         )
         gc.collect()
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
+    print(f"best_map50_checkpoint={best_map_path}")
+    print(f"best_val_loss_checkpoint={best_val_loss_path}")
+    print(f"best_f1_checkpoint={best_f1_path}")
     print(f"best_checkpoint={best_path}")
     print(f"history={history_path}")
 
