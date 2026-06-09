@@ -55,10 +55,15 @@ def load_model(
     strides = tuple(int(stride) for stride in checkpoint.get("strides", DEFAULT_STRIDES))
     reg_max = int(checkpoint.get("reg_max", 16))
     image_size = int(checkpoint.get("image_size", 416))
+    backbone_name = checkpoint.get("backbone_name")
+    if backbone_name is None:
+        architecture = str(checkpoint.get("architecture", ""))
+        backbone_name = "resnet101" if "resnet101" in architecture else "resnet50"
 
     model = YoloLite(
         num_classes=len(classes),
         pretrained_backbone=False,
+        backbone_name=backbone_name,
         strides=strides,
         reg_max=reg_max,
     ).to(device)

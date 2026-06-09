@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from .backbone import ResNet50Backbone
+from .backbone import ResNetBackbone
 from .head import DetectionHead
 from .neck import BiFPN
 
@@ -18,6 +18,7 @@ class YoloLite(nn.Module):
         num_classes: int = 5,
         pretrained_backbone: bool = False,
         freeze_backbone_stem: bool = False,
+        backbone_name: str = "resnet50",
         fpn_channels: int = 256,
         strides: tuple[int, ...] = DEFAULT_STRIDES,
         reg_max: int = 16,
@@ -28,8 +29,10 @@ class YoloLite(nn.Module):
         self.box_channels = 4 * (self.reg_max + 1)
         self.num_outputs = self.box_channels + 1 + num_classes
         self.strides = tuple(int(stride) for stride in strides)
+        self.backbone_name = backbone_name.lower()
 
-        self.backbone = ResNet50Backbone(
+        self.backbone = ResNetBackbone(
+            name=self.backbone_name,
             pretrained=pretrained_backbone,
             freeze_stem=freeze_backbone_stem,
         )
@@ -57,6 +60,7 @@ def build_model(
     num_classes: int = len(DEFAULT_CLASSES),
     pretrained_backbone: bool = False,
     freeze_backbone_stem: bool = False,
+    backbone_name: str = "resnet50",
     image_size: int = 416,
     reg_max: int = 16,
 ) -> YoloLite:
@@ -64,5 +68,6 @@ def build_model(
         num_classes=num_classes,
         pretrained_backbone=pretrained_backbone,
         freeze_backbone_stem=freeze_backbone_stem,
+        backbone_name=backbone_name,
         reg_max=reg_max,
     )

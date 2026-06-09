@@ -17,6 +17,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from tqdm.auto import tqdm
 
+from models.backbone import SUPPORTED_BACKBONES
 from models.yolo import DEFAULT_CLASSES, build_model
 from utils.dataset import make_dataloader
 from utils.loss import YoloDetectionLoss
@@ -56,6 +57,12 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--pretrained_backbone", action="store_true")
     parser.add_argument("--freeze_backbone_stem", action="store_true")
+    parser.add_argument(
+        "--backbone",
+        default="resnet50",
+        choices=SUPPORTED_BACKBONES,
+        help="Feature extractor backbone.",
+    )
     parser.add_argument("--amp", action="store_true")
     parser.add_argument(
         "--disable_tqdm",
@@ -590,7 +597,8 @@ def save_checkpoint(
         "optimizer_state": optimizer.state_dict(),
         "epoch": epoch,
         "classes": list(DEFAULT_CLASSES),
-        "architecture": "anchor_free_decoupled_yolo_lite_resnet50_bifpn_dfl",
+        "architecture": f"anchor_free_decoupled_yolo_lite_{model.backbone_name}_bifpn_dfl",
+        "backbone_name": model.backbone_name,
         "strides": list(model.strides),
         "reg_max": model.reg_max,
         "image_size": args.image_size,
@@ -634,6 +642,7 @@ def append_history(
         "weight_decay",
         "warmup_epochs",
         "reg_max",
+        "backbone",
         "oversample_classes",
         "oversample_factor",
         "pretrained_backbone",
@@ -689,6 +698,7 @@ def append_history(
         "weight_decay": args.weight_decay,
         "warmup_epochs": args.warmup_epochs,
         "reg_max": args.reg_max,
+        "backbone": args.backbone,
         "oversample_classes": " ".join(args.oversample_classes),
         "oversample_factor": args.oversample_factor,
         "pretrained_backbone": args.pretrained_backbone,
@@ -765,6 +775,7 @@ def main() -> None:
         num_classes=len(DEFAULT_CLASSES),
         pretrained_backbone=args.pretrained_backbone,
         freeze_backbone_stem=args.freeze_backbone_stem,
+        backbone_name=args.backbone,
         image_size=args.image_size,
         reg_max=args.reg_max,
     ).to(device)
