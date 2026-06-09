@@ -102,7 +102,7 @@ def distribution_focal_loss(
 
     loss_left = F.cross_entropy(logits, left, reduction="none") * weight_left
     loss_right = F.cross_entropy(logits, right, reduction="none") * weight_right
-    return (loss_left + loss_right).view(-1, 4).sum(dim=1)
+    return (loss_left + loss_right).view(-1, 4).mean(dim=1)
 
 
 @dataclass

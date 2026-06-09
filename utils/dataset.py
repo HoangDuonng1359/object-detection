@@ -52,15 +52,15 @@ class ObjectDetectionDataset(Dataset):
         self.transform = transform or DetectionTransform(
             image_size=image_size,
             train=train,
-            crop_prob=0.25 if train else 0.0,
+            crop_prob=0.10 if train else 0.0,
             hflip_prob=0.5 if train else 0.0,
-            color_jitter_prob=0.8 if train else 0.0,
-            scale_translate_prob=0.35 if train else 0.0,
-            grayscale_prob=0.08 if train else 0.0,
-            blur_prob=0.10 if train else 0.0,
-            cutout_prob=0.15 if train else 0.0,
+            color_jitter_prob=0.50 if train else 0.0,
+            scale_translate_prob=0.20 if train else 0.0,
+            grayscale_prob=0.0,
+            blur_prob=0.0,
+            cutout_prob=0.05 if train else 0.0,
             focus_label_indices=focus_class_indices if train else (),
-            focus_aug_boost=1.5,
+            focus_aug_boost=1.2,
         )
 
     def __len__(self) -> int:
