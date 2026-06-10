@@ -245,16 +245,16 @@ No `--best_metric` argument is needed.
 Training uses box-aware augmentation in `utils/augmentation.py`:
 
 ```text
-random scale/translate  p=0.20
-random crop             p=0.10
+random scale/translate  p=0.10
+random crop             p=0.05
 horizontal flip         p=0.50
-color jitter            p=0.50
-small cutout            p=0.05
+color jitter            p=0.40
+small cutout            disabled
 letterbox resize
 ImageNet normalization
 ```
 
-Grayscale and blur are disabled by default to keep training examples closer to the validation distribution. Images containing `chair` get a mild `1.2x` probability boost for scale, crop, color, and cutout transforms. Validation and prediction only use letterbox resize plus normalization.
+Grayscale, blur, and cutout are disabled by default to keep training examples closer to the validation distribution and reduce car false positives. Images containing `chair` get a mild `1.2x` probability boost for scale, crop, and color transforms. Validation and prediction only use letterbox resize plus normalization.
 
 ## Train
 
