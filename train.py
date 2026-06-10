@@ -41,6 +41,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup_epochs", type=int, default=3)
     parser.add_argument("--grad_clip", type=float, default=10.0)
     parser.add_argument("--reg_max", type=int, default=16)
+    parser.add_argument(
+        "--small_object_max_side",
+        type=float,
+        default=96.0,
+        help="Max resized box side assigned to the finest detection scale.",
+    )
+    parser.add_argument(
+        "--medium_object_max_side",
+        type=float,
+        default=224.0,
+        help="Max resized box side assigned to the middle detection scale.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--oversample_classes",
@@ -602,6 +614,10 @@ def save_checkpoint(
         "strides": list(model.strides),
         "reg_max": model.reg_max,
         "image_size": args.image_size,
+        "assignment": {
+            "small_object_max_side": args.small_object_max_side,
+            "medium_object_max_side": args.medium_object_max_side,
+        },
         "checkpoint_metric": metric_name,
         "checkpoint_metric_value": metric_value,
         "best_metrics": best_metrics,
@@ -642,6 +658,8 @@ def append_history(
         "weight_decay",
         "warmup_epochs",
         "reg_max",
+        "small_object_max_side",
+        "medium_object_max_side",
         "backbone",
         "oversample_classes",
         "oversample_factor",
@@ -698,6 +716,8 @@ def append_history(
         "weight_decay": args.weight_decay,
         "warmup_epochs": args.warmup_epochs,
         "reg_max": args.reg_max,
+        "small_object_max_side": args.small_object_max_side,
+        "medium_object_max_side": args.medium_object_max_side,
         "backbone": args.backbone,
         "oversample_classes": " ".join(args.oversample_classes),
         "oversample_factor": args.oversample_factor,
@@ -784,6 +804,8 @@ def main() -> None:
         strides=model.strides,
         num_classes=len(DEFAULT_CLASSES),
         reg_max=model.reg_max,
+        small_object_max_side=args.small_object_max_side,
+        medium_object_max_side=args.medium_object_max_side,
     ).to(device)
     class_thresholds = make_class_threshold_tensor(
         DEFAULT_CLASSES,

@@ -125,8 +125,8 @@ class YoloDetectionLoss(nn.Module):
         focal_alpha: float = 0.25,
         focal_gamma: float = 2.0,
         center_radius: int = 1,
-        small_object_max_side: float = 64.0,
-        medium_object_max_side: float = 160.0,
+        small_object_max_side: float = 96.0,
+        medium_object_max_side: float = 224.0,
         reg_max: int = 16,
     ) -> None:
         super().__init__()
