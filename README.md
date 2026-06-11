@@ -166,15 +166,23 @@ The decoded box is:
 
 ### Target Assignment
 
-The loss assigns each ground-truth box to one feature scale based on object size:
+The loss uses a simplified Task-Aligned Assignment strategy inspired by modern
+anchor-free YOLO detectors:
 
 ```text
-small objects  -> stride 8
-medium objects -> stride 16
-large objects  -> stride 32
+candidate points = points inside each ground-truth box across all feature scales
+alignment metric = class_score^tal_alpha * IoU^tal_beta
+positive points  = top tal_topk candidates per ground-truth box
 ```
 
-Positive grid cells are chosen around the object center using a small center radius. If multiple objects compete for the same cell, the smaller-area object is kept for that cell.
+By default, `tal_topk=10`, `tal_alpha=1.0`, and `tal_beta=6.0`. If multiple
+objects compete for the same grid cell, the assignment with the higher alignment
+metric is kept. The objectness target is quality-aware, using the selected
+candidate's normalized alignment and IoU instead of a hard `1.0` target.
+
+The size thresholds `small_object_max_side` and `medium_object_max_side` are kept
+as a fallback for extremely small boxes that have no candidate point inside the
+box.
 
 ### Loss Function
 

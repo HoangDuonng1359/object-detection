@@ -65,6 +65,28 @@ def bbox_ciou(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
     return iou - center_distance / enclose_diag.clamp(min=1e-6) - alpha * v
 
 
+def bbox_iou_matrix(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
+    if boxes1.numel() == 0 or boxes2.numel() == 0:
+        return torch.zeros(
+            (boxes1.shape[0], boxes2.shape[0]),
+            device=boxes1.device,
+            dtype=boxes1.dtype,
+        )
+
+    lt = torch.maximum(boxes1[:, None, :2], boxes2[None, :, :2])
+    rb = torch.minimum(boxes1[:, None, 2:], boxes2[None, :, 2:])
+    wh = (rb - lt).clamp(min=0)
+    intersection = wh[..., 0] * wh[..., 1]
+    area1 = (boxes1[:, 2] - boxes1[:, 0]).clamp(min=0) * (
+        boxes1[:, 3] - boxes1[:, 1]
+    ).clamp(min=0)
+    area2 = (boxes2[:, 2] - boxes2[:, 0]).clamp(min=0) * (
+        boxes2[:, 3] - boxes2[:, 1]
+    ).clamp(min=0)
+    union = area1[:, None] + area2[None, :] - intersection
+    return intersection / union.clamp(min=1e-6)
+
+
 def focal_bce_with_logits(
     logits: torch.Tensor,
     targets: torch.Tensor,
@@ -127,6 +149,9 @@ class YoloDetectionLoss(nn.Module):
         center_radius: int = 1,
         small_object_max_side: float = 96.0,
         medium_object_max_side: float = 224.0,
+        tal_topk: int = 10,
+        tal_alpha: float = 1.0,
+        tal_beta: float = 6.0,
         reg_max: int = 16,
     ) -> None:
         super().__init__()
@@ -141,6 +166,9 @@ class YoloDetectionLoss(nn.Module):
         self.center_radius = center_radius
         self.small_object_max_side = small_object_max_side
         self.medium_object_max_side = medium_object_max_side
+        self.tal_topk = int(tal_topk)
+        self.tal_alpha = float(tal_alpha)
+        self.tal_beta = float(tal_beta)
         self.reg_max = int(reg_max)
         self.reg_bins = self.reg_max + 1
         self.box_channels = 4 * self.reg_bins
@@ -167,6 +195,22 @@ class YoloDetectionLoss(nn.Module):
         if max_side <= self.medium_object_max_side:
             return min(1, len(self.strides) - 1)
         return len(self.strides) - 1
+
+    @staticmethod
+    def make_points(
+        height: int,
+        width: int,
+        stride: int,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        grid_y, grid_x = torch.meshgrid(
+            torch.arange(height, device=device),
+            torch.arange(width, device=device),
+            indexing="ij",
+        )
+        point_x = (grid_x.float() + 0.5) * float(stride)
+        point_y = (grid_y.float() + 0.5) * float(stride)
+        return point_x, point_y
 
     def decode_boxes(self, prediction: torch.Tensor, stride: int) -> torch.Tensor:
         batch_size, _, height, width = prediction.shape
@@ -257,7 +301,7 @@ class YoloDetectionLoss(nn.Module):
         box_targets: list[torch.Tensor] = []
         class_targets: list[torch.Tensor] = []
         positive_masks: list[torch.Tensor] = []
-        area_targets: list[torch.Tensor] = []
+        alignment_targets: list[torch.Tensor] = []
 
         for prediction in predictions:
             batch_size, _, height, width = prediction.shape
@@ -274,45 +318,172 @@ class YoloDetectionLoss(nn.Module):
             positive_masks.append(
                 torch.zeros(batch_size, height, width, dtype=torch.bool, device=device)
             )
-            area_targets.append(torch.full((batch_size, height, width), float("inf"), device=device))
+            alignment_targets.append(torch.zeros(batch_size, height, width, device=device))
 
-        for batch_index, target in enumerate(targets):
-            boxes = target["boxes"].to(device=device, dtype=torch.float32)
-            labels = target["labels"].to(device=device, dtype=torch.long)
-            if boxes.numel() == 0:
-                continue
+        with torch.no_grad():
+            decoded_by_scale = [
+                self.decode_boxes(prediction, self.strides[scale_index])
+                .permute(0, 2, 3, 1)
+                .detach()
+                for scale_index, prediction in enumerate(predictions)
+            ]
+            objectness_by_scale = [
+                torch.sigmoid(prediction[:, self.objectness_index]).detach()
+                for prediction in predictions
+            ]
+            class_probs_by_scale = [
+                torch.softmax(
+                    prediction[:, self.class_start_index :],
+                    dim=1,
+                )
+                .permute(0, 2, 3, 1)
+                .detach()
+                for prediction in predictions
+            ]
+            points_by_scale = [
+                self.make_points(
+                    prediction.shape[2],
+                    prediction.shape[3],
+                    self.strides[scale_index],
+                    device,
+                )
+                for scale_index, prediction in enumerate(predictions)
+            ]
 
-            cxcywh = xyxy_to_cxcywh(boxes)
-            for box_index, (cx, cy, box_w, box_h) in enumerate(cxcywh):
-                scale_index = self.choose_scale(box_w, box_h)
-                stride = self.strides[scale_index]
-                _, grid_h, grid_w = objectness_targets[scale_index].shape
-                center_x = int(torch.clamp((cx / stride).floor(), 0, grid_w - 1).item())
-                center_y = int(torch.clamp((cy / stride).floor(), 0, grid_h - 1).item())
-                area = box_w * box_h
+            for batch_index, target in enumerate(targets):
+                boxes = target["boxes"].to(device=device, dtype=torch.float32)
+                labels = target["labels"].to(device=device, dtype=torch.long)
+                if boxes.numel() == 0:
+                    continue
 
-                for offset_y in range(-self.center_radius, self.center_radius + 1):
-                    for offset_x in range(-self.center_radius, self.center_radius + 1):
-                        grid_x = center_x + offset_x
-                        grid_y = center_y + offset_y
-                        if grid_x < 0 or grid_x >= grid_w or grid_y < 0 or grid_y >= grid_h:
+                cxcywh = xyxy_to_cxcywh(boxes)
+                for box_index, (cx, cy, box_w, box_h) in enumerate(cxcywh):
+                    box = boxes[box_index]
+                    label = labels[box_index]
+                    candidate_metrics: list[torch.Tensor] = []
+                    candidate_ious: list[torch.Tensor] = []
+                    candidate_scales: list[torch.Tensor] = []
+                    candidate_ys: list[torch.Tensor] = []
+                    candidate_xs: list[torch.Tensor] = []
+
+                    for scale_index, prediction in enumerate(predictions):
+                        point_x, point_y = points_by_scale[scale_index]
+                        inside_box = (
+                            (point_x >= box[0])
+                            & (point_x <= box[2])
+                            & (point_y >= box[1])
+                            & (point_y <= box[3])
+                        )
+                        ys, xs = torch.where(inside_box)
+                        if ys.numel() == 0:
                             continue
 
-                        point_x = (grid_x + 0.5) * stride
-                        point_y = (grid_y + 0.5) * stride
-                        x1, y1, x2, y2 = boxes[box_index]
-                        if point_x < x1 or point_x > x2 or point_y < y1 or point_y > y2:
+                        pred_boxes = decoded_by_scale[scale_index][batch_index, ys, xs]
+                        ious = bbox_iou_matrix(pred_boxes, box.view(1, 4)).squeeze(1)
+                        class_scores = class_probs_by_scale[scale_index][
+                            batch_index,
+                            ys,
+                            xs,
+                            label,
+                        ]
+                        objectness_scores = objectness_by_scale[scale_index][
+                            batch_index,
+                            ys,
+                            xs,
+                        ]
+                        scores = (objectness_scores * class_scores).clamp(min=0.0)
+                        metrics = scores.pow(self.tal_alpha) * ious.clamp(min=0.0).pow(
+                            self.tal_beta
+                        )
+                        candidate_metrics.append(metrics)
+                        candidate_ious.append(ious)
+                        candidate_scales.append(
+                            torch.full_like(ys, scale_index, dtype=torch.long)
+                        )
+                        candidate_ys.append(ys)
+                        candidate_xs.append(xs)
+
+                    if not candidate_metrics:
+                        scale_index = self.choose_scale(box_w, box_h)
+                        _, grid_h, grid_w = objectness_targets[scale_index].shape
+                        center_x = int(
+                            torch.clamp((cx / self.strides[scale_index]).floor(), 0, grid_w - 1)
+                            .item()
+                        )
+                        center_y = int(
+                            torch.clamp((cy / self.strides[scale_index]).floor(), 0, grid_h - 1)
+                            .item()
+                        )
+                        candidate_metrics = [torch.ones(1, device=device)]
+                        candidate_ious = [torch.full((1,), 0.05, device=device)]
+                        candidate_scales = [
+                            torch.tensor([scale_index], dtype=torch.long, device=device)
+                        ]
+                        candidate_ys = [
+                            torch.tensor([center_y], dtype=torch.long, device=device)
+                        ]
+                        candidate_xs = [
+                            torch.tensor([center_x], dtype=torch.long, device=device)
+                        ]
+
+                    metrics = torch.cat(candidate_metrics)
+                    ious = torch.cat(candidate_ious).clamp(min=0.0, max=1.0)
+                    scale_indices = torch.cat(candidate_scales)
+                    ys = torch.cat(candidate_ys)
+                    xs = torch.cat(candidate_xs)
+
+                    if torch.all(metrics <= 0):
+                        center_dist = []
+                        for scale_index, point_pair in enumerate(points_by_scale):
+                            point_x, point_y = point_pair
+                            scale_mask = scale_indices == scale_index
+                            if not scale_mask.any():
+                                continue
+                            point_dist = (
+                                (point_x[ys[scale_mask], xs[scale_mask]] - cx).pow(2)
+                                + (point_y[ys[scale_mask], xs[scale_mask]] - cy).pow(2)
+                            ).sqrt()
+                            center_dist.append((scale_mask, point_dist))
+                        fallback_metrics = torch.zeros_like(metrics)
+                        for scale_mask, point_dist in center_dist:
+                            fallback_metrics[scale_mask] = 1.0 / (
+                                1.0 + point_dist / float(self.strides[0])
+                            )
+                        metrics = fallback_metrics
+
+                    topk = min(self.tal_topk, metrics.numel())
+                    top_values, top_indices = torch.topk(metrics, k=topk, largest=True)
+                    top_ious = ious[top_indices]
+                    top_scales = scale_indices[top_indices]
+                    top_ys = ys[top_indices]
+                    top_xs = xs[top_indices]
+
+                    max_metric = top_values.max().clamp(min=1e-6)
+                    quality_targets = (top_values / max_metric * top_ious).clamp(
+                        min=0.05,
+                        max=1.0,
+                    )
+
+                    for item_index in range(top_indices.numel()):
+                        scale_index = int(top_scales[item_index].item())
+                        grid_y = int(top_ys[item_index].item())
+                        grid_x = int(top_xs[item_index].item())
+                        metric_value = top_values[item_index]
+                        current_metric = alignment_targets[scale_index][
+                            batch_index,
+                            grid_y,
+                            grid_x,
+                        ]
+                        if current_metric > metric_value:
                             continue
 
-                        current_area = area_targets[scale_index][batch_index, grid_y, grid_x]
-                        if current_area <= area:
-                            continue
-
-                        objectness_targets[scale_index][batch_index, grid_y, grid_x] = 1.0
-                        box_targets[scale_index][batch_index, :, grid_y, grid_x] = boxes[box_index]
-                        class_targets[scale_index][batch_index, grid_y, grid_x] = labels[box_index]
+                        objectness_targets[scale_index][batch_index, grid_y, grid_x] = (
+                            quality_targets[item_index]
+                        )
+                        box_targets[scale_index][batch_index, :, grid_y, grid_x] = box
+                        class_targets[scale_index][batch_index, grid_y, grid_x] = label
                         positive_masks[scale_index][batch_index, grid_y, grid_x] = True
-                        area_targets[scale_index][batch_index, grid_y, grid_x] = area
+                        alignment_targets[scale_index][batch_index, grid_y, grid_x] = metric_value
 
         return LossTargets(
             objectness=objectness_targets,

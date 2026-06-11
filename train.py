@@ -53,6 +53,24 @@ def parse_args() -> argparse.Namespace:
         default=224.0,
         help="Max resized box side assigned to the middle detection scale.",
     )
+    parser.add_argument(
+        "--tal_topk",
+        type=int,
+        default=10,
+        help="Top-k candidates per ground-truth box for task-aligned assignment.",
+    )
+    parser.add_argument(
+        "--tal_alpha",
+        type=float,
+        default=1.0,
+        help="Classification-score exponent for task-aligned assignment.",
+    )
+    parser.add_argument(
+        "--tal_beta",
+        type=float,
+        default=6.0,
+        help="IoU exponent for task-aligned assignment.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--oversample_classes",
@@ -617,6 +635,9 @@ def save_checkpoint(
         "assignment": {
             "small_object_max_side": args.small_object_max_side,
             "medium_object_max_side": args.medium_object_max_side,
+            "tal_topk": args.tal_topk,
+            "tal_alpha": args.tal_alpha,
+            "tal_beta": args.tal_beta,
         },
         "checkpoint_metric": metric_name,
         "checkpoint_metric_value": metric_value,
@@ -660,6 +681,9 @@ def append_history(
         "reg_max",
         "small_object_max_side",
         "medium_object_max_side",
+        "tal_topk",
+        "tal_alpha",
+        "tal_beta",
         "backbone",
         "oversample_classes",
         "oversample_factor",
@@ -718,6 +742,9 @@ def append_history(
         "reg_max": args.reg_max,
         "small_object_max_side": args.small_object_max_side,
         "medium_object_max_side": args.medium_object_max_side,
+        "tal_topk": args.tal_topk,
+        "tal_alpha": args.tal_alpha,
+        "tal_beta": args.tal_beta,
         "backbone": args.backbone,
         "oversample_classes": " ".join(args.oversample_classes),
         "oversample_factor": args.oversample_factor,
@@ -806,6 +833,9 @@ def main() -> None:
         reg_max=model.reg_max,
         small_object_max_side=args.small_object_max_side,
         medium_object_max_side=args.medium_object_max_side,
+        tal_topk=args.tal_topk,
+        tal_alpha=args.tal_alpha,
+        tal_beta=args.tal_beta,
     ).to(device)
     class_thresholds = make_class_threshold_tensor(
         DEFAULT_CLASSES,
