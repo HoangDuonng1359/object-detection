@@ -1,6 +1,6 @@
-# Object Detection YOLO-Lite
+# Object Detection YOLOv8-Style
 
-This project implements an object detector from scratch with PyTorch. The model uses a pretrained ResNet50 feature extractor, a custom BiFPN neck, a decoupled anchor-free detection head, a custom detection loss, and per-class NMS during inference.
+This project implements an object detector with PyTorch. The default model is a practical YOLOv8-style hybrid: ImageNet-pretrained ResNet backbone, YOLOv8-style PAN-FPN neck, objectness-free decoupled detection head, DFL box regression, task-aligned assignment, and per-class NMS during inference.
 
 ## Setup
 
@@ -27,16 +27,16 @@ public/
 
 ## Model Architecture
 
-The detector is implemented as a small anchor-free YOLO-style model. It does not use any complete object detection framework such as YOLOv5/v8, Detectron2, MMDetection, Faster R-CNN, or SSD. The only pretrained component is the ResNet50 classification backbone from `torchvision`.
+The detector is implemented as an anchor-free YOLOv8-style model. It does not import or wrap any complete object detection framework such as Ultralytics YOLO, Detectron2, MMDetection, Faster R-CNN, or SSD. The default uses a pretrained ResNet feature extractor to avoid training all low-level features from scratch.
 
 ### Overview
 
 ```text
 Input image
   -> Letterbox resize + ImageNet normalization
-  -> ResNet50 backbone
-  -> 3-scale BiFPN neck
-  -> Decoupled anchor-free detection heads
+  -> ResNet50/ResNet101 pretrained backbone
+  -> YOLOv8-style PAN-FPN neck
+  -> Objectness-free decoupled detection heads
   -> Decode boxes + confidence filtering + per-class NMS
   -> predictions.json
 ```
@@ -51,42 +51,39 @@ person, car, dog, cat, chair
 
 File: `models/backbone.py`
 
-The backbone is `ResNet50Backbone`, built from `torchvision.models.resnet50`.
+The default backbone is `ResNetBackbone`, built from `torchvision.models.resnet50` or `torchvision.models.resnet101`.
 
-When `--pretrained_backbone` is enabled, ImageNet pretrained ResNet50 weights are used. The detector removes the classification head and returns intermediate feature maps:
+Default notebook setting:
 
 ```text
-C3: stride 8,  channels 512
-C4: stride 16, channels 1024
-C5: stride 32, channels 2048
+BACKBONE_NAME = "resnet50"
+USE_PRETRAINED_BACKBONE = True
 ```
 
-The model uses three detection scales to reduce memory use while still covering small, medium, and large objects.
+The backbone returns three feature maps:
+
+```text
+C3: stride 8
+C4: stride 16
+C5: stride 32
+```
+
+YOLOv8-style backbone variants `yolov8n`, `yolov8s`, and `yolov8m` are still available, but they are implemented from scratch here and do not use pretrained Ultralytics weights.
 
 ### Neck
 
 File: `models/neck.py`
 
-The neck is a custom 3-scale BiFPN module named `BiFPN`.
-
-Feature fusion points use learnable non-negative weights instead of plain addition:
-
-```text
-fused = (w1 * feature_a + ... + wn * feature_n) / (w1 + ... + wn + eps)
-```
-
-The weights are initialized equally, then learned during training. This lets the model decide how much to trust each input path at every BiFPN node.
-
-After 1x1 lateral projection, the BiFPN repeats bidirectional fusion blocks:
+The default neck is `YoloV8PAN`, a PAN-FPN neck with C2f fusion blocks:
 
 ```text
 Top-down:
-weighted(P4_in, upsample(P5_in)) -> P4_td
-weighted(P3_in, upsample(P4_td)) -> P3_out
+concat(P4, upsample(P5)) -> C2f -> P4_td
+concat(P3, upsample(P4_td)) -> C2f -> P3_out
 
 Bottom-up:
-weighted(P4_in, P4_td, downsample(P3_out)) -> P4_out
-weighted(P5_in, downsample(P4_out)) -> P5_out
+concat(P4_td, downsample(P3_out)) -> C2f -> P4_out
+concat(P5, downsample(P4_out)) -> C2f -> P5_out
 ```
 
 Every neck output has 256 channels:
@@ -113,30 +110,30 @@ The head is anchor-free and decoupled. Each scale has two separate towers:
 
 ```text
 feature
-  -> box tower   -> ltrb distribution + objectness
-  -> class tower -> class logits
+  -> box tower   -> ltrb distribution
+  -> class tower -> quality-aware class logits
 ```
 
 Each scale outputs:
 
 ```text
 [left_distribution, top_distribution, right_distribution, bottom_distribution,
- objectness, class_logits...]
+ class_logits...]
 ```
 
 With `reg_max = 16` and 5 classes, each output tensor has:
 
 ```text
-4 * (reg_max + 1) + 1 + num_classes = 74 channels
+4 * (reg_max + 1) + num_classes = 73 channels
 ```
 
 The full model output is a list of three tensors, one per stride:
 
 ```text
 [
-  B x 74 x H/8  x W/8,
-  B x 74 x H/16 x W/16,
-  B x 74 x H/32 x W/32,
+  B x 73 x H/8  x W/8,
+  B x 73 x H/16 x W/16,
+  B x 73 x H/32 x W/32,
 ]
 ```
 
@@ -175,9 +172,9 @@ alignment metric = class_score^tal_alpha * IoU^tal_beta
 positive points  = top tal_topk candidates per ground-truth box
 ```
 
-By default, `tal_topk=10`, `tal_alpha=1.0`, and `tal_beta=6.0`. If multiple
+By default, `tal_topk=5`, `tal_alpha=0.5`, and `tal_beta=4.0`. If multiple
 objects compete for the same grid cell, the assignment with the higher alignment
-metric is kept. The objectness target is quality-aware, using the selected
+metric is kept. The selected class target is quality-aware, using the selected
 candidate's normalized alignment and IoU instead of a hard `1.0` target.
 
 The size thresholds `small_object_max_side` and `medium_object_max_side` are kept
@@ -188,23 +185,21 @@ box.
 
 File: `utils/loss.py`
 
-The training loss has four parts:
+The training loss has three active parts:
 
 ```text
 total_loss =
-  5.0 * box_loss
-  + 1.0 * dfl_loss
-  + 1.0 * objectness_loss
+  7.5 * box_loss
+  + 1.5 * dfl_loss
   + 0.5 * class_loss
 ```
 
 Where:
 
 ```text
-box_loss        = 1 - CIoU
-dfl_loss        = distribution focal loss for l/t/r/b distances
-objectness_loss = focal BCE with logits
-class_loss      = cross entropy
+box_loss   = quality-weighted 1 - CIoU
+dfl_loss   = quality-weighted distribution focal loss for l/t/r/b distances
+class_loss = BCE with quality-aware class targets
 ```
 
 ### Inference
@@ -218,7 +213,7 @@ Inference follows these steps:
 2. Normalize with ImageNet mean/std.
 3. Run the model.
 4. Decode boxes from all three feature scales.
-5. Compute confidence = sigmoid(objectness) * max_class_probability.
+5. Compute confidence = max sigmoid(class_logit).
 6. Apply global or per-class confidence thresholds.
 7. Run NMS independently for each class.
 8. Map boxes back to original image coordinates.
@@ -286,6 +281,8 @@ python train.py \
   --image_dir ./public/train/images \
   --val_image_dir ./public/val/images \
   --checkpoint_dir ./models/ \
+  --backbone resnet50 \
+  --neck yolov8_pan \
   --image_size 512 \
   --epochs 70 \
   --batch_size 4 \

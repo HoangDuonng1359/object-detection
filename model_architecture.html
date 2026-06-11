@@ -174,7 +174,7 @@
 </head>
 <body>
   <header>
-    <h1>YOLO-Lite: ResNet50 + 3-Scale BiFPN + Anchor-Free Head</h1>
+    <h1>YOLOv8-Style Hybrid: ResNet Backbone + PAN-FPN + DFL Head</h1>
     <p>
       Kiến trúc hiện tại đã bỏ P2 stride 4 để giảm VRAM và tăng tốc.
       Model còn 3 scale dự đoán: stride 8, 16, 32.
@@ -203,8 +203,8 @@
           <path class="arrow" d="M155 145 H205"></path>
 
           <rect class="box backbone" x="205" y="55" width="175" height="180"></rect>
-          <text class="text-main" x="292" y="86" text-anchor="middle">ResNet50</text>
-          <text class="text-sub" x="292" y="109" text-anchor="middle">pretrained optional</text>
+          <text class="text-main" x="292" y="86" text-anchor="middle">ResNet Backbone</text>
+          <text class="text-sub" x="292" y="109" text-anchor="middle">ImageNet pretrained</text>
           <text class="text-sub" x="292" y="142" text-anchor="middle">C3 stride 8</text>
           <text class="text-sub" x="292" y="168" text-anchor="middle">C4 stride 16</text>
           <text class="text-sub" x="292" y="194" text-anchor="middle">C5 stride 32</text>
@@ -212,9 +212,9 @@
           <path class="arrow" d="M380 145 H430"></path>
 
           <rect class="box neck" x="430" y="55" width="210" height="180"></rect>
-          <text class="text-main" x="535" y="86" text-anchor="middle">BiFPN Neck</text>
-          <text class="text-sub" x="535" y="113" text-anchor="middle">learnable weighted fusion</text>
-          <text class="text-sub" x="535" y="136" text-anchor="middle">repeated bidirectional blocks</text>
+          <text class="text-main" x="535" y="86" text-anchor="middle">YOLOv8 PAN-FPN</text>
+          <text class="text-sub" x="535" y="113" text-anchor="middle">top-down + bottom-up</text>
+          <text class="text-sub" x="535" y="136" text-anchor="middle">concat + C2f fusion</text>
           <text class="text-sub" x="535" y="171" text-anchor="middle">P3, P4, P5</text>
           <text class="text-sub" x="535" y="196" text-anchor="middle">256 channels each</text>
 
@@ -223,9 +223,8 @@
           <rect class="box head" x="690" y="55" width="190" height="180"></rect>
           <text class="text-main" x="785" y="86" text-anchor="middle">Decoupled Head</text>
           <text class="text-sub" x="785" y="118" text-anchor="middle">DFL box tower</text>
-          <text class="text-sub" x="785" y="141" text-anchor="middle">objectness</text>
-          <text class="text-sub" x="785" y="164" text-anchor="middle">class tower</text>
-          <text class="text-sub" x="785" y="198" text-anchor="middle">74 channels/scale</text>
+          <text class="text-sub" x="785" y="146" text-anchor="middle">quality class tower</text>
+          <text class="text-sub" x="785" y="198" text-anchor="middle">73 channels/scale</text>
 
           <path class="arrow" d="M880 145 H930"></path>
 
@@ -247,7 +246,7 @@
       </p>
 
       <div class="diagram-wrap">
-        <svg width="980" height="340" viewBox="0 0 980 340" role="img" aria-label="Three scale BiFPN diagram">
+        <svg width="980" height="340" viewBox="0 0 980 340" role="img" aria-label="Three scale PAN-FPN diagram">
           <defs>
             <marker id="arrow2" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
               <path d="M0,0 L0,6 L9,3 z" fill="#475569"></path>
@@ -355,15 +354,15 @@
         </div>
         <div class="mini-card">
           <strong>Confidence</strong>
-          <code>sigmoid(objectness) * max_class_probability</code>.
+          <code>max sigmoid(class_logit)</code>.
         </div>
       </div>
 
       <pre><code>Output for IMAGE_SIZE = 512:
 [
-  B x 74 x 64 x 64,  # stride 8
-  B x 74 x 32 x 32,  # stride 16
-  B x 74 x 16 x 16,  # stride 32
+  B x 73 x 64 x 64,  # stride 8
+  B x 73 x 32 x 32,  # stride 16
+  B x 73 x 16 x 16,  # stride 32
 ]</code></pre>
     </section>
 
@@ -453,11 +452,11 @@ bbox = [
         <tbody>
           <tr>
             <th>Backbone</th>
-            <td>ResNet50, có thể dùng pretrained ImageNet.</td>
+            <td>ResNet50/ResNet101 pretrained backbone.</td>
           </tr>
           <tr>
             <th>Neck</th>
-            <td>Custom BiFPN, 3 scale, 256 channels.</td>
+            <td>YOLOv8-style PAN-FPN, 3 scale, 256 channels.</td>
           </tr>
           <tr>
             <th>Head</th>
@@ -469,7 +468,7 @@ bbox = [
           </tr>
           <tr>
             <th>Output channels</th>
-            <td>74 per scale = 4 * 17 DFL bins + 1 objectness + 5 class logits.</td>
+            <td>73 per scale = 4 * 17 DFL bins + 5 quality-aware class logits.</td>
           </tr>
           <tr>
             <th>Lợi ích sau khi bỏ P2</th>

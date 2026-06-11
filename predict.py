@@ -50,25 +50,41 @@ def load_model(
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
     classes = list(checkpoint.get("classes", DEFAULT_CLASSES))
     strides = tuple(int(stride) for stride in checkpoint.get("strides", DEFAULT_STRIDES))
     reg_max = int(checkpoint.get("reg_max", 16))
     image_size = int(checkpoint.get("image_size", 416))
+    neck_name = str(checkpoint.get("neck_name", "yolov8_pan"))
     backbone_name = checkpoint.get("backbone_name")
     if backbone_name is None:
         architecture = str(checkpoint.get("architecture", ""))
-        backbone_name = "resnet101" if "resnet101" in architecture else "resnet50"
+        if "yolov8m" in architecture:
+            backbone_name = "yolov8m"
+        elif "yolov8s" in architecture:
+            backbone_name = "yolov8s"
+        elif "yolov8n" in architecture:
+            backbone_name = "yolov8n"
+        else:
+            backbone_name = "resnet101" if "resnet101" in architecture else "resnet50"
 
     model = YoloLite(
         num_classes=len(classes),
         pretrained_backbone=False,
         backbone_name=backbone_name,
+        neck_name=neck_name,
         strides=strides,
         reg_max=reg_max,
     ).to(device)
     state = checkpoint.get("model_state", checkpoint)
-    model.load_state_dict(state)
+    try:
+        model.load_state_dict(state)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "Checkpoint is not compatible with the current objectness-free head. "
+            "Train a new checkpoint with the updated code, or use the older code "
+            "that produced this checkpoint."
+        ) from exc
     model.eval()
     return model, classes, image_size
 
@@ -156,17 +172,12 @@ def decode_predictions(
             criterion.strides[scale_index],
         )
         boxes = decoded.permute(0, 2, 3, 1).reshape(batch_size, -1, 4)
-        objectness = torch.sigmoid(prediction[:, criterion.objectness_index]).reshape(
-            batch_size,
-            -1,
-        )
-        class_probs = torch.softmax(prediction[:, criterion.class_start_index :], dim=1)
-        class_scores, class_labels = class_probs.permute(0, 2, 3, 1).reshape(
+        class_probs = torch.sigmoid(prediction[:, criterion.class_start_index :])
+        scores, class_labels = class_probs.permute(0, 2, 3, 1).reshape(
             batch_size,
             -1,
             criterion.num_classes,
         ).max(dim=-1)
-        scores = objectness * class_scores
         thresholds = (
             class_thresholds[class_labels]
             if class_thresholds is not None

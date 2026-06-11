@@ -24,6 +24,9 @@ from utils.loss import YoloDetectionLoss
 from utils.thresholds import make_class_threshold_tensor, parse_class_thresholds
 
 
+SUPPORTED_NECKS = ("yolov8_pan", "bifpn")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train the YOLO-lite detector.")
     parser.add_argument("--train_data", required=True, type=Path)
@@ -56,19 +59,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tal_topk",
         type=int,
-        default=10,
+        default=5,
         help="Top-k candidates per ground-truth box for task-aligned assignment.",
     )
     parser.add_argument(
         "--tal_alpha",
         type=float,
-        default=1.0,
+        default=0.5,
         help="Classification-score exponent for task-aligned assignment.",
     )
     parser.add_argument(
         "--tal_beta",
         type=float,
-        default=6.0,
+        default=4.0,
         help="IoU exponent for task-aligned assignment.",
     )
     parser.add_argument("--seed", type=int, default=42)
@@ -92,6 +95,12 @@ def parse_args() -> argparse.Namespace:
         default="resnet50",
         choices=SUPPORTED_BACKBONES,
         help="Feature extractor backbone.",
+    )
+    parser.add_argument(
+        "--neck",
+        default="yolov8_pan",
+        choices=SUPPORTED_NECKS,
+        help="Feature pyramid neck.",
     )
     parser.add_argument("--amp", action="store_true")
     parser.add_argument(
@@ -198,17 +207,12 @@ def decode_batch_predictions(
             criterion.strides[scale_index],
         )
         boxes = decoded_boxes.permute(0, 2, 3, 1).reshape(batch_size, -1, 4)
-        objectness = torch.sigmoid(prediction[:, criterion.objectness_index]).reshape(
-            batch_size,
-            -1,
-        )
-        class_probs = torch.softmax(prediction[:, criterion.class_start_index :], dim=1)
-        class_scores, class_labels = class_probs.permute(0, 2, 3, 1).reshape(
+        class_probs = torch.sigmoid(prediction[:, criterion.class_start_index :])
+        scores, class_labels = class_probs.permute(0, 2, 3, 1).reshape(
             batch_size,
             -1,
             criterion.num_classes,
         ).max(dim=-1)
-        scores = objectness * class_scores
         thresholds = (
             class_thresholds[class_labels]
             if class_thresholds is not None
@@ -512,8 +516,8 @@ def train_one_epoch(
                 loss=f"{totals['loss'] / steps:.4f}",
                 box=f"{totals['box_loss'] / steps:.4f}",
                 dfl=f"{totals['dfl_loss'] / steps:.4f}",
-                obj=f"{totals['objectness_loss'] / steps:.4f}",
                 cls=f"{totals['class_loss'] / steps:.4f}",
+                pos=f"{totals['num_positive'] / steps:.0f}",
             )
         if max_train_batches > 0 and steps >= max_train_batches:
             break
@@ -627,8 +631,13 @@ def save_checkpoint(
         "optimizer_state": optimizer.state_dict(),
         "epoch": epoch,
         "classes": list(DEFAULT_CLASSES),
-        "architecture": f"anchor_free_decoupled_yolo_lite_{model.backbone_name}_bifpn_dfl",
+        "architecture": (
+            f"anchor_free_decoupled_yolov8_style_"
+            f"{model.backbone_name}_{model.neck_name}_dfl"
+        ),
+        "head_type": "objectness_free_quality_class",
         "backbone_name": model.backbone_name,
+        "neck_name": model.neck_name,
         "strides": list(model.strides),
         "reg_max": model.reg_max,
         "image_size": args.image_size,
@@ -685,6 +694,7 @@ def append_history(
         "tal_alpha",
         "tal_beta",
         "backbone",
+        "neck",
         "oversample_classes",
         "oversample_factor",
         "pretrained_backbone",
@@ -746,6 +756,7 @@ def append_history(
         "tal_alpha": args.tal_alpha,
         "tal_beta": args.tal_beta,
         "backbone": args.backbone,
+        "neck": args.neck,
         "oversample_classes": " ".join(args.oversample_classes),
         "oversample_factor": args.oversample_factor,
         "pretrained_backbone": args.pretrained_backbone,
@@ -793,6 +804,12 @@ def main() -> None:
     args = parse_args()
     seed_everything(args.seed)
     args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    if args.backbone.startswith("yolov8") and args.pretrained_backbone:
+        print(
+            f"{args.backbone} is implemented from scratch in this project; "
+            "ignoring --pretrained_backbone."
+        )
+        args.pretrained_backbone = False
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = args.amp and device.type == "cuda"
@@ -823,6 +840,7 @@ def main() -> None:
         pretrained_backbone=args.pretrained_backbone,
         freeze_backbone_stem=args.freeze_backbone_stem,
         backbone_name=args.backbone,
+        neck_name=args.neck,
         image_size=args.image_size,
         reg_max=args.reg_max,
     ).to(device)

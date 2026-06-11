@@ -129,9 +129,8 @@ def distribution_focal_loss(
 
 @dataclass
 class LossTargets:
-    objectness: list[torch.Tensor]
+    class_scores: list[torch.Tensor]
     boxes: list[torch.Tensor]
-    classes: list[torch.Tensor]
     positive_masks: list[torch.Tensor]
 
 
@@ -140,18 +139,17 @@ class YoloDetectionLoss(nn.Module):
         self,
         strides: tuple[int, ...],
         num_classes: int = 5,
-        box_weight: float = 5.0,
-        dfl_weight: float = 1.0,
-        objectness_weight: float = 1.0,
+        box_weight: float = 7.5,
+        dfl_weight: float = 1.5,
         class_weight: float = 0.5,
         focal_alpha: float = 0.25,
         focal_gamma: float = 2.0,
         center_radius: int = 1,
         small_object_max_side: float = 96.0,
         medium_object_max_side: float = 224.0,
-        tal_topk: int = 10,
-        tal_alpha: float = 1.0,
-        tal_beta: float = 6.0,
+        tal_topk: int = 5,
+        tal_alpha: float = 0.5,
+        tal_beta: float = 4.0,
         reg_max: int = 16,
     ) -> None:
         super().__init__()
@@ -159,7 +157,6 @@ class YoloDetectionLoss(nn.Module):
         self.strides = tuple(int(stride) for stride in strides)
         self.box_weight = box_weight
         self.dfl_weight = dfl_weight
-        self.objectness_weight = objectness_weight
         self.class_weight = class_weight
         self.focal_alpha = focal_alpha
         self.focal_gamma = focal_gamma
@@ -172,8 +169,7 @@ class YoloDetectionLoss(nn.Module):
         self.reg_max = int(reg_max)
         self.reg_bins = self.reg_max + 1
         self.box_channels = 4 * self.reg_bins
-        self.objectness_index = self.box_channels
-        self.class_start_index = self.objectness_index + 1
+        self.class_start_index = self.box_channels
         self.register_buffer(
             "dfl_projection",
             torch.arange(self.reg_bins, dtype=torch.float32),
@@ -297,24 +293,23 @@ class YoloDetectionLoss(nn.Module):
         targets: list[dict[str, Any]],
     ) -> LossTargets:
         device = predictions[0].device
-        objectness_targets: list[torch.Tensor] = []
+        class_score_targets: list[torch.Tensor] = []
         box_targets: list[torch.Tensor] = []
-        class_targets: list[torch.Tensor] = []
         positive_masks: list[torch.Tensor] = []
         alignment_targets: list[torch.Tensor] = []
 
         for prediction in predictions:
             batch_size, _, height, width = prediction.shape
-            objectness_targets.append(torch.zeros(batch_size, height, width, device=device))
-            box_targets.append(torch.zeros(batch_size, 4, height, width, device=device))
-            class_targets.append(
-                torch.full(
-                    (batch_size, height, width),
-                    -1,
-                    dtype=torch.long,
+            class_score_targets.append(
+                torch.zeros(
+                    batch_size,
+                    self.num_classes,
+                    height,
+                    width,
                     device=device,
                 )
             )
+            box_targets.append(torch.zeros(batch_size, 4, height, width, device=device))
             positive_masks.append(
                 torch.zeros(batch_size, height, width, dtype=torch.bool, device=device)
             )
@@ -327,15 +322,8 @@ class YoloDetectionLoss(nn.Module):
                 .detach()
                 for scale_index, prediction in enumerate(predictions)
             ]
-            objectness_by_scale = [
-                torch.sigmoid(prediction[:, self.objectness_index]).detach()
-                for prediction in predictions
-            ]
-            class_probs_by_scale = [
-                torch.softmax(
-                    prediction[:, self.class_start_index :],
-                    dim=1,
-                )
+            class_scores_by_scale = [
+                torch.sigmoid(prediction[:, self.class_start_index :])
                 .permute(0, 2, 3, 1)
                 .detach()
                 for prediction in predictions
@@ -380,21 +368,15 @@ class YoloDetectionLoss(nn.Module):
 
                         pred_boxes = decoded_by_scale[scale_index][batch_index, ys, xs]
                         ious = bbox_iou_matrix(pred_boxes, box.view(1, 4)).squeeze(1)
-                        class_scores = class_probs_by_scale[scale_index][
+                        class_scores = class_scores_by_scale[scale_index][
                             batch_index,
                             ys,
                             xs,
                             label,
                         ]
-                        objectness_scores = objectness_by_scale[scale_index][
-                            batch_index,
-                            ys,
-                            xs,
-                        ]
-                        scores = (objectness_scores * class_scores).clamp(min=0.0)
-                        metrics = scores.pow(self.tal_alpha) * ious.clamp(min=0.0).pow(
-                            self.tal_beta
-                        )
+                        metrics = class_scores.clamp(min=0.0).pow(
+                            self.tal_alpha
+                        ) * ious.clamp(min=0.0).pow(self.tal_beta)
                         candidate_metrics.append(metrics)
                         candidate_ious.append(ious)
                         candidate_scales.append(
@@ -405,7 +387,7 @@ class YoloDetectionLoss(nn.Module):
 
                     if not candidate_metrics:
                         scale_index = self.choose_scale(box_w, box_h)
-                        _, grid_h, grid_w = objectness_targets[scale_index].shape
+                        _, _, grid_h, grid_w = class_score_targets[scale_index].shape
                         center_x = int(
                             torch.clamp((cx / self.strides[scale_index]).floor(), 0, grid_w - 1)
                             .item()
@@ -415,7 +397,7 @@ class YoloDetectionLoss(nn.Module):
                             .item()
                         )
                         candidate_metrics = [torch.ones(1, device=device)]
-                        candidate_ious = [torch.full((1,), 0.05, device=device)]
+                        candidate_ious = [torch.ones(1, device=device)]
                         candidate_scales = [
                             torch.tensor([scale_index], dtype=torch.long, device=device)
                         ]
@@ -477,18 +459,20 @@ class YoloDetectionLoss(nn.Module):
                         if current_metric > metric_value:
                             continue
 
-                        objectness_targets[scale_index][batch_index, grid_y, grid_x] = (
-                            quality_targets[item_index]
-                        )
+                        class_score_targets[scale_index][batch_index, :, grid_y, grid_x] = 0.0
+                        class_score_targets[scale_index][
+                            batch_index,
+                            label,
+                            grid_y,
+                            grid_x,
+                        ] = quality_targets[item_index]
                         box_targets[scale_index][batch_index, :, grid_y, grid_x] = box
-                        class_targets[scale_index][batch_index, grid_y, grid_x] = label
                         positive_masks[scale_index][batch_index, grid_y, grid_x] = True
                         alignment_targets[scale_index][batch_index, grid_y, grid_x] = metric_value
 
         return LossTargets(
-            objectness=objectness_targets,
+            class_scores=class_score_targets,
             boxes=box_targets,
-            classes=class_targets,
             positive_masks=positive_masks,
         )
 
@@ -499,21 +483,21 @@ class YoloDetectionLoss(nn.Module):
     ) -> dict[str, torch.Tensor]:
         loss_targets = self.build_targets(predictions, targets)
         device = predictions[0].device
-        objectness_loss_sum = torch.zeros((), device=device)
         box_loss_sum = torch.zeros((), device=device)
         dfl_loss_sum = torch.zeros((), device=device)
         class_loss_sum = torch.zeros((), device=device)
         positive_count = torch.zeros((), device=device)
+        target_score_sum = torch.zeros((), device=device)
 
         for scale_index, prediction in enumerate(predictions):
-            objectness_logits = prediction[:, self.objectness_index]
-            objectness_targets = loss_targets.objectness[scale_index]
-            objectness_loss_sum = objectness_loss_sum + focal_bce_with_logits(
-                objectness_logits,
-                objectness_targets,
-                alpha=self.focal_alpha,
-                gamma=self.focal_gamma,
-            ).sum()
+            class_logits_all = prediction[:, self.class_start_index :]
+            class_targets_all = loss_targets.class_scores[scale_index]
+            class_loss_sum = class_loss_sum + F.binary_cross_entropy_with_logits(
+                class_logits_all,
+                class_targets_all,
+                reduction="sum",
+            )
+            target_score_sum = target_score_sum + class_targets_all.sum()
 
             positive_mask = loss_targets.positive_masks[scale_index]
             num_positive = positive_mask.sum()
@@ -524,7 +508,10 @@ class YoloDetectionLoss(nn.Module):
             decoded_boxes = self.decode_boxes(prediction, self.strides[scale_index])
             predicted_boxes = decoded_boxes.permute(0, 2, 3, 1)[positive_mask]
             target_boxes = loss_targets.boxes[scale_index].permute(0, 2, 3, 1)[positive_mask]
-            box_loss_sum = box_loss_sum + (1.0 - bbox_ciou(predicted_boxes, target_boxes)).sum()
+            box_weights = class_targets_all.permute(0, 2, 3, 1)[positive_mask].sum(dim=1)
+            box_loss_sum = box_loss_sum + (
+                (1.0 - bbox_ciou(predicted_boxes, target_boxes)) * box_weights
+            ).sum()
 
             box_logits = prediction[:, : self.box_channels].view(
                 prediction.shape[0],
@@ -539,29 +526,23 @@ class YoloDetectionLoss(nn.Module):
                 positive_mask,
                 self.strides[scale_index],
             )
-            dfl_loss_sum = dfl_loss_sum + distribution_focal_loss(
-                box_logits,
-                target_ltrb,
-                self.reg_max,
+            dfl_loss_sum = dfl_loss_sum + (
+                distribution_focal_loss(
+                    box_logits,
+                    target_ltrb,
+                    self.reg_max,
+                )
+                * box_weights
             ).sum()
 
-            class_logits = prediction[:, self.class_start_index :].permute(0, 2, 3, 1)[positive_mask]
-            class_targets = loss_targets.classes[scale_index][positive_mask]
-            class_loss_sum = class_loss_sum + F.cross_entropy(
-                class_logits,
-                class_targets,
-                reduction="sum",
-            )
-
-        normalizer = positive_count.clamp(min=1.0)
+        normalizer = target_score_sum.clamp(min=1.0)
         box_loss = box_loss_sum / normalizer
         dfl_loss = dfl_loss_sum / normalizer
-        objectness_loss = objectness_loss_sum / normalizer
+        objectness_loss = torch.zeros((), device=device)
         class_loss = class_loss_sum / normalizer
         total_loss = (
             self.box_weight * box_loss
             + self.dfl_weight * dfl_loss
-            + self.objectness_weight * objectness_loss
             + self.class_weight * class_loss
         )
         return {

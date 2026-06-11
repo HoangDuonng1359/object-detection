@@ -32,6 +32,136 @@ class ConvBNAct(nn.Module):
         return self.block(x)
 
 
+class Bottleneck(nn.Module):
+    """YOLOv8-style bottleneck used inside C2f blocks."""
+
+    def __init__(
+        self,
+        channels: int,
+        shortcut: bool = True,
+    ) -> None:
+        super().__init__()
+        self.conv1 = ConvBNAct(channels, channels, kernel_size=3)
+        self.conv2 = ConvBNAct(channels, channels, kernel_size=3)
+        self.use_shortcut = shortcut
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = self.conv2(self.conv1(x))
+        return x + out if self.use_shortcut else out
+
+
+class C2f(nn.Module):
+    """Compact CSP block used by YOLOv8."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        num_blocks: int = 1,
+        shortcut: bool = False,
+        expansion: float = 0.5,
+    ) -> None:
+        super().__init__()
+        hidden_channels = int(out_channels * expansion)
+        self.conv1 = ConvBNAct(in_channels, hidden_channels * 2, kernel_size=1)
+        self.blocks = nn.ModuleList(
+            Bottleneck(hidden_channels, shortcut=shortcut)
+            for _ in range(num_blocks)
+        )
+        self.conv2 = ConvBNAct(
+            hidden_channels * (2 + num_blocks),
+            out_channels,
+            kernel_size=1,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        parts = list(self.conv1(x).chunk(2, dim=1))
+        for block in self.blocks:
+            parts.append(block(parts[-1]))
+        return self.conv2(torch.cat(parts, dim=1))
+
+
+class SPPF(nn.Module):
+    """Spatial pyramid pooling-fast block from YOLOv8."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        pool_size: int = 5,
+    ) -> None:
+        super().__init__()
+        hidden_channels = in_channels // 2
+        self.conv1 = ConvBNAct(in_channels, hidden_channels, kernel_size=1)
+        self.pool = nn.MaxPool2d(
+            kernel_size=pool_size,
+            stride=1,
+            padding=pool_size // 2,
+        )
+        self.conv2 = ConvBNAct(hidden_channels * 4, out_channels, kernel_size=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv1(x)
+        y1 = self.pool(x)
+        y2 = self.pool(y1)
+        y3 = self.pool(y2)
+        return self.conv2(torch.cat((x, y1, y2, y3), dim=1))
+
+
+class YoloV8PAN(nn.Module):
+    """YOLOv8-style PAN-FPN neck with C2f fusion blocks."""
+
+    def __init__(
+        self,
+        in_channels: tuple[int, int, int],
+        out_channels: int = 256,
+        num_blocks: int = 3,
+    ) -> None:
+        super().__init__()
+        c3_channels, c4_channels, c5_channels = in_channels
+
+        self.reduce_c5 = ConvBNAct(c5_channels, out_channels, kernel_size=1)
+        self.reduce_c4 = ConvBNAct(c4_channels, out_channels, kernel_size=1)
+        self.reduce_c3 = ConvBNAct(c3_channels, out_channels, kernel_size=1)
+
+        self.top_p4 = C2f(out_channels * 2, out_channels, num_blocks=num_blocks)
+        self.top_p3 = C2f(out_channels * 2, out_channels, num_blocks=num_blocks)
+        self.down_p3 = ConvBNAct(out_channels, out_channels, stride=2)
+        self.bottom_p4 = C2f(out_channels * 2, out_channels, num_blocks=num_blocks)
+        self.down_p4 = ConvBNAct(out_channels, out_channels, stride=2)
+        self.bottom_p5 = C2f(out_channels * 2, out_channels, num_blocks=num_blocks)
+
+    @staticmethod
+    def _resize_like(source: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        if source.shape[-2:] == target.shape[-2:]:
+            return source
+        return F.interpolate(source, size=target.shape[-2:], mode="nearest")
+
+    def forward(
+        self,
+        features: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        c3, c4, c5 = features
+        p3 = self.reduce_c3(c3)
+        p4 = self.reduce_c4(c4)
+        p5 = self.reduce_c5(c5)
+
+        p4_td = self.top_p4(
+            torch.cat((p4, F.interpolate(p5, size=p4.shape[-2:], mode="nearest")), dim=1)
+        )
+        p3_out = self.top_p3(
+            torch.cat((p3, F.interpolate(p4_td, size=p3.shape[-2:], mode="nearest")), dim=1)
+        )
+
+        p4_out = self.bottom_p4(
+            torch.cat((p4_td, self._resize_like(self.down_p3(p3_out), p4_td)), dim=1)
+        )
+        p5_out = self.bottom_p5(
+            torch.cat((p5, self._resize_like(self.down_p4(p4_out), p5)), dim=1)
+        )
+        return p3_out, p4_out, p5_out
+
+
 class WeightedFusion(nn.Module):
     def __init__(self, num_inputs: int, eps: float = 1e-4) -> None:
         super().__init__()
