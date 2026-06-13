@@ -25,10 +25,10 @@ YOLOV8_SCALES = {
 
 
 class ResNetBackbone(nn.Module):
-    """ResNet feature extractor returning strides 8, 16, and 32."""
+    """ResNet feature extractor returning strides 4, 8, 16, and 32."""
 
-    out_channels = (512, 1024, 2048)
-    strides = (8, 16, 32)
+    out_channels = (256, 512, 1024, 2048)
+    strides = (4, 8, 16, 32)
 
     def __init__(
         self,
@@ -55,8 +55,8 @@ class ResNetBackbone(nn.Module):
             model.bn1,
             model.relu,
             model.maxpool,
-            model.layer1,
         )
+        self.layer1 = model.layer1
         self.layer2 = model.layer2
         self.layer3 = model.layer3
         self.layer4 = model.layer4
@@ -68,18 +68,19 @@ class ResNetBackbone(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         x = self.stem(x)
-        c3 = self.layer2(x)
+        c2 = self.layer1(x)
+        c3 = self.layer2(c2)
         c4 = self.layer3(c3)
         c5 = self.layer4(c4)
-        return c3, c4, c5
+        return c2, c3, c4, c5
 
 
 class YoloV8Backbone(nn.Module):
-    """YOLOv8-style CSPDarknet backbone returning P3/P4/P5 features."""
+    """YOLOv8-style CSPDarknet backbone returning P2/P3/P4/P5 features."""
 
-    strides = (8, 16, 32)
+    strides = (4, 8, 16, 32)
 
     def __init__(
         self,
@@ -110,7 +111,7 @@ class YoloV8Backbone(nn.Module):
         n5 = scale_depth(3, depth_multiplier)
 
         self.name = name
-        self.out_channels = (c3, c4, c5)
+        self.out_channels = (c2, c3, c4, c5)
 
         self.stem = ConvBNAct(3, c1, stride=2)
         self.stage2 = nn.Sequential(
@@ -138,13 +139,13 @@ class YoloV8Backbone(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         x = self.stem(x)
-        x = self.stage2(x)
-        c3 = self.stage3(x)
+        c2 = self.stage2(x)
+        c3 = self.stage3(c2)
         c4 = self.stage4(c3)
         c5 = self.stage5(c4)
-        return c3, c4, c5
+        return c2, c3, c4, c5
 
 
 class ResNet50Backbone(ResNetBackbone):

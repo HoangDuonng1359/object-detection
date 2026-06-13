@@ -113,12 +113,22 @@ class YoloV8PAN(nn.Module):
 
     def __init__(
         self,
-        in_channels: tuple[int, int, int],
+        in_channels: tuple[int, ...],
         out_channels: int = 256,
         num_blocks: int = 3,
     ) -> None:
         super().__init__()
-        c3_channels, c4_channels, c5_channels = in_channels
+        if len(in_channels) == 4:
+            c2_channels, c3_channels, c4_channels, c5_channels = in_channels
+            self.use_p2 = True
+            self.reduce_c2 = ConvBNAct(c2_channels, out_channels, kernel_size=1)
+        elif len(in_channels) == 3:
+            c3_channels, c4_channels, c5_channels = in_channels
+            self.use_p2 = False
+        else:
+            raise ValueError(
+                f"YoloV8PAN expects 3 or 4 feature maps, got {len(in_channels)}."
+            )
 
         self.reduce_c5 = ConvBNAct(c5_channels, out_channels, kernel_size=1)
         self.reduce_c4 = ConvBNAct(c4_channels, out_channels, kernel_size=1)
@@ -126,6 +136,10 @@ class YoloV8PAN(nn.Module):
 
         self.top_p4 = C2f(out_channels * 2, out_channels, num_blocks=num_blocks)
         self.top_p3 = C2f(out_channels * 2, out_channels, num_blocks=num_blocks)
+        if self.use_p2:
+            self.top_p2 = C2f(out_channels * 2, out_channels, num_blocks=num_blocks)
+            self.down_p2 = ConvBNAct(out_channels, out_channels, stride=2)
+            self.bottom_p3 = C2f(out_channels * 2, out_channels, num_blocks=num_blocks)
         self.down_p3 = ConvBNAct(out_channels, out_channels, stride=2)
         self.bottom_p4 = C2f(out_channels * 2, out_channels, num_blocks=num_blocks)
         self.down_p4 = ConvBNAct(out_channels, out_channels, stride=2)
@@ -139,9 +153,17 @@ class YoloV8PAN(nn.Module):
 
     def forward(
         self,
-        features: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        c3, c4, c5 = features
+        features: tuple[torch.Tensor, ...],
+    ) -> tuple[torch.Tensor, ...]:
+        if self.use_p2:
+            if len(features) != 4:
+                raise ValueError(f"YoloV8PAN with P2 expects 4 features, got {len(features)}.")
+            c2, c3, c4, c5 = features
+            p2 = self.reduce_c2(c2)
+        else:
+            if len(features) != 3:
+                raise ValueError(f"YoloV8PAN expects 3 features, got {len(features)}.")
+            c3, c4, c5 = features
         p3 = self.reduce_c3(c3)
         p4 = self.reduce_c4(c4)
         p5 = self.reduce_c5(c5)
@@ -153,12 +175,34 @@ class YoloV8PAN(nn.Module):
             torch.cat((p3, F.interpolate(p4_td, size=p3.shape[-2:], mode="nearest")), dim=1)
         )
 
+        if self.use_p2:
+            p2_out = self.top_p2(
+                torch.cat(
+                    (
+                        p2,
+                        F.interpolate(p3_out, size=p2.shape[-2:], mode="nearest"),
+                    ),
+                    dim=1,
+                )
+            )
+            p3_out = self.bottom_p3(
+                torch.cat(
+                    (
+                        p3_out,
+                        self._resize_like(self.down_p2(p2_out), p3_out),
+                    ),
+                    dim=1,
+                )
+            )
+
         p4_out = self.bottom_p4(
             torch.cat((p4_td, self._resize_like(self.down_p3(p3_out), p4_td)), dim=1)
         )
         p5_out = self.bottom_p5(
             torch.cat((p5, self._resize_like(self.down_p4(p4_out), p5)), dim=1)
         )
+        if self.use_p2:
+            return p2_out, p3_out, p4_out, p5_out
         return p3_out, p4_out, p5_out
 
 

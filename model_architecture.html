@@ -176,8 +176,8 @@
   <header>
     <h1>YOLOv8-Style Hybrid: ResNet Backbone + PAN-FPN + DFL Head</h1>
     <p>
-      Kiến trúc hiện tại đã bỏ P2 stride 4 để giảm VRAM và tăng tốc.
-      Model còn 3 scale dự đoán: stride 8, 16, 32.
+      Kiến trúc hiện tại đã thêm lại P2 stride 4 để tăng khả năng bắt object nhỏ.
+      Model dự đoán 4 scale: stride 4, 8, 16, 32.
     </p>
   </header>
 
@@ -205,9 +205,10 @@
           <rect class="box backbone" x="205" y="55" width="175" height="180"></rect>
           <text class="text-main" x="292" y="86" text-anchor="middle">ResNet Backbone</text>
           <text class="text-sub" x="292" y="109" text-anchor="middle">ImageNet pretrained</text>
-          <text class="text-sub" x="292" y="142" text-anchor="middle">C3 stride 8</text>
-          <text class="text-sub" x="292" y="168" text-anchor="middle">C4 stride 16</text>
-          <text class="text-sub" x="292" y="194" text-anchor="middle">C5 stride 32</text>
+          <text class="text-sub" x="292" y="134" text-anchor="middle">C2 stride 4</text>
+          <text class="text-sub" x="292" y="158" text-anchor="middle">C3 stride 8</text>
+          <text class="text-sub" x="292" y="182" text-anchor="middle">C4 stride 16</text>
+          <text class="text-sub" x="292" y="206" text-anchor="middle">C5 stride 32</text>
 
           <path class="arrow" d="M380 145 H430"></path>
 
@@ -215,7 +216,7 @@
           <text class="text-main" x="535" y="86" text-anchor="middle">YOLOv8 PAN-FPN</text>
           <text class="text-sub" x="535" y="113" text-anchor="middle">top-down + bottom-up</text>
           <text class="text-sub" x="535" y="136" text-anchor="middle">concat + C2f fusion</text>
-          <text class="text-sub" x="535" y="171" text-anchor="middle">P3, P4, P5</text>
+          <text class="text-sub" x="535" y="171" text-anchor="middle">P2, P3, P4, P5</text>
           <text class="text-sub" x="535" y="196" text-anchor="middle">256 channels each</text>
 
           <path class="arrow" d="M640 145 H690"></path>
@@ -239,14 +240,14 @@
     </section>
 
     <section>
-      <h2>2. Feature Pyramid Sau Khi Bỏ P2</h2>
+      <h2>2. Feature Pyramid Có P2</h2>
       <p>
-        P2 stride 4 đã được gỡ để giảm bộ nhớ. Với input 512, model không còn tạo
-        feature map 128 x 128 nữa. Scale nhỏ nhất hiện là stride 8, tức 64 x 64.
+        P2 stride 4 đã được thêm lại. Với input 512, model tạo thêm feature map
+        128 x 128, hữu ích cho car/chair nhỏ nhưng tốn VRAM hơn.
       </p>
 
       <div class="diagram-wrap">
-        <svg width="980" height="340" viewBox="0 0 980 340" role="img" aria-label="Three scale PAN-FPN diagram">
+        <svg width="980" height="340" viewBox="0 0 980 340" role="img" aria-label="Four scale PAN-FPN diagram">
           <defs>
             <marker id="arrow2" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
               <path d="M0,0 L0,6 L9,3 z" fill="#475569"></path>
@@ -316,6 +317,12 @@
         </thead>
         <tbody>
           <tr>
+            <td>P2</td>
+            <td>4</td>
+            <td>128 x 128</td>
+            <td>Object rất nhỏ; hữu ích cho car/chair nhỏ.</td>
+          </tr>
+          <tr>
             <td>P3</td>
             <td>8</td>
             <td>64 x 64</td>
@@ -360,6 +367,7 @@
 
       <pre><code>Output for IMAGE_SIZE = 512:
 [
+  B x 73 x 128 x 128,  # stride 4
   B x 73 x 64 x 64,  # stride 8
   B x 73 x 32 x 32,  # stride 16
   B x 73 x 16 x 16,  # stride 32
@@ -415,8 +423,8 @@ bbox = [
       </table>
 
       <div class="note">
-        Sau khi bỏ P2, object nhỏ nhất được gán về stride 8 thay vì stride 4.
-        Điều này nhẹ hơn đáng kể, nhưng có thể làm recall của object rất nhỏ giảm một chút.
+        Sau khi thêm P2, object nhỏ có thêm stride 4 thay vì chỉ dựa vào stride 8.
+        Điều này có thể tăng recall cho object nhỏ, đổi lại VRAM và thời gian train tăng.
       </div>
     </section>
 
@@ -456,7 +464,7 @@ bbox = [
           </tr>
           <tr>
             <th>Neck</th>
-            <td>YOLOv8-style PAN-FPN, 3 scale, 256 channels.</td>
+            <td>YOLOv8-style PAN-FPN, 4 scale, 256 channels.</td>
           </tr>
           <tr>
             <th>Head</th>
@@ -464,19 +472,19 @@ bbox = [
           </tr>
           <tr>
             <th>Strides</th>
-            <td>8, 16, 32.</td>
+            <td>4, 8, 16, 32.</td>
           </tr>
           <tr>
             <th>Output channels</th>
             <td>73 per scale = 4 * 17 DFL bins + 5 quality-aware class logits.</td>
           </tr>
           <tr>
-            <th>Lợi ích sau khi bỏ P2</th>
-            <td>Ít tốn VRAM hơn, train ổn định hơn, predict nhanh hơn.</td>
+            <th>Lợi ích sau khi thêm P2</th>
+            <td>Tăng độ phân giải feature cho object nhỏ như car/chair ở xa.</td>
           </tr>
           <tr>
             <th>Đánh đổi</th>
-            <td>Object rất nhỏ có thể khó bắt hơn so với bản có stride 4.</td>
+            <td>Tốn VRAM hơn, train/predict chậm hơn; có thể cần giảm batch size.</td>
           </tr>
         </tbody>
       </table>

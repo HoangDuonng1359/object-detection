@@ -60,9 +60,10 @@ BACKBONE_NAME = "resnet50"
 USE_PRETRAINED_BACKBONE = True
 ```
 
-The backbone returns three feature maps:
+The backbone returns four feature maps:
 
 ```text
+C2: stride 4
 C3: stride 8
 C4: stride 16
 C5: stride 32
@@ -80,8 +81,10 @@ The default neck is `YoloV8PAN`, a PAN-FPN neck with C2f fusion blocks:
 Top-down:
 concat(P4, upsample(P5)) -> C2f -> P4_td
 concat(P3, upsample(P4_td)) -> C2f -> P3_out
+concat(P2, upsample(P3_out)) -> C2f -> P2_out
 
 Bottom-up:
+concat(P3_out, downsample(P2_out)) -> C2f -> P3_out
 concat(P4_td, downsample(P3_out)) -> C2f -> P4_out
 concat(P5, downsample(P4_out)) -> C2f -> P5_out
 ```
@@ -89,6 +92,7 @@ concat(P5, downsample(P4_out)) -> C2f -> P5_out
 Every neck output has 256 channels:
 
 ```text
+P2: stride 4
 P3: stride 8
 P4: stride 16
 P5: stride 32
@@ -97,6 +101,7 @@ P5: stride 32
 For `IMAGE_SIZE = 512`, the prediction feature shapes are:
 
 ```text
+stride 4:   128 x 128
 stride 8:   64 x 64
 stride 16:  32 x 32
 stride 32:  16 x 16
@@ -127,10 +132,11 @@ With `reg_max = 16` and 5 classes, each output tensor has:
 4 * (reg_max + 1) + num_classes = 73 channels
 ```
 
-The full model output is a list of three tensors, one per stride:
+The full model output is a list of four tensors, one per stride:
 
 ```text
 [
+  B x 73 x H/4  x W/4,
   B x 73 x H/8  x W/8,
   B x 73 x H/16 x W/16,
   B x 73 x H/32 x W/32,
@@ -212,7 +218,7 @@ Inference follows these steps:
 1. Letterbox resize image to checkpoint image_size.
 2. Normalize with ImageNet mean/std.
 3. Run the model.
-4. Decode boxes from all three feature scales.
+4. Decode boxes from all feature scales.
 5. Compute confidence = max sigmoid(class_logit).
 6. Apply global or per-class confidence thresholds.
 7. Run NMS independently for each class.

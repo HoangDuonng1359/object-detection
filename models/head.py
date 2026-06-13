@@ -45,9 +45,9 @@ class DetectionHead(nn.Module):
         self,
         num_classes: int = 5,
         in_channels: int = 256,
-        num_scales: int = 3,
+        num_scales: int = 4,
         reg_max: int = 16,
-        strides: tuple[int, ...] = (8, 16, 32),
+        strides: tuple[int, ...] = (4, 8, 16, 32),
         image_size: int = 640,
     ) -> None:
         super().__init__()

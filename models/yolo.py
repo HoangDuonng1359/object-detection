@@ -9,7 +9,7 @@ from .neck import BiFPN, YoloV8PAN
 
 
 DEFAULT_CLASSES = ("person", "car", "dog", "cat", "chair")
-DEFAULT_STRIDES = (8, 16, 32)
+DEFAULT_STRIDES = (4, 8, 16, 32)
 
 
 class YoloLite(nn.Module):
@@ -21,7 +21,7 @@ class YoloLite(nn.Module):
         backbone_name: str = "resnet50",
         neck_name: str = "yolov8_pan",
         fpn_channels: int = 256,
-        strides: tuple[int, ...] = DEFAULT_STRIDES,
+        strides: tuple[int, ...] | None = None,
         reg_max: int = 16,
         image_size: int = 640,
     ) -> None:
@@ -30,7 +30,6 @@ class YoloLite(nn.Module):
         self.reg_max = int(reg_max)
         self.box_channels = 4 * (self.reg_max + 1)
         self.num_outputs = self.box_channels + num_classes
-        self.strides = tuple(int(stride) for stride in strides)
         self.image_size = int(image_size)
         self.backbone_name = backbone_name.lower()
         self.neck_name = neck_name.lower()
@@ -49,14 +48,24 @@ class YoloLite(nn.Module):
             )
 
         if self.neck_name == "yolov8_pan":
+            self.neck_feature_slice = slice(None)
+            self.strides = tuple(
+                int(stride)
+                for stride in (strides if strides is not None else self.backbone.strides)
+            )
             self.neck = YoloV8PAN(
                 in_channels=self.backbone.out_channels,
                 out_channels=fpn_channels,
                 num_blocks=3,
             )
         elif self.neck_name == "bifpn":
+            self.neck_feature_slice = slice(-3, None)
+            self.strides = tuple(
+                int(stride)
+                for stride in (strides if strides is not None else self.backbone.strides[-3:])
+            )
             self.neck = BiFPN(
-                in_channels=self.backbone.out_channels,
+                in_channels=self.backbone.out_channels[-3:],
                 out_channels=fpn_channels,
             )
         else:
@@ -74,7 +83,7 @@ class YoloLite(nn.Module):
 
     def forward(self, images: torch.Tensor) -> list[torch.Tensor]:
         features = self.backbone(images)
-        pyramid = self.neck(features)
+        pyramid = self.neck(features[self.neck_feature_slice])
         return self.head(pyramid)
 
     def feature_shapes(self, image_size: int = 416) -> list[tuple[int, int]]:
