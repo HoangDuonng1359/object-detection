@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from .backbone import ResNetBackbone, YoloV8Backbone
+from .backbone import ConvNeXtBackbone, ResNetBackbone, YoloV8Backbone
 from .head import DetectionHead
 from .neck import BiFPN, YoloV8PAN
 
@@ -36,6 +36,12 @@ class YoloLite(nn.Module):
 
         if self.backbone_name.startswith("yolov8"):
             self.backbone = YoloV8Backbone(
+                name=self.backbone_name,
+                pretrained=pretrained_backbone,
+                freeze_stem=freeze_backbone_stem,
+            )
+        elif self.backbone_name.startswith("convnext"):
+            self.backbone = ConvNeXtBackbone(
                 name=self.backbone_name,
                 pretrained=pretrained_backbone,
                 freeze_stem=freeze_backbone_stem,

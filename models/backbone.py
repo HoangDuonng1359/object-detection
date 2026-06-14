@@ -2,11 +2,25 @@ from __future__ import annotations
 
 import torch
 from torch import nn
-from torchvision.models import ResNet101_Weights, ResNet50_Weights, resnet101, resnet50
+from torchvision.models import (
+    ConvNeXt_Small_Weights,
+    ResNet101_Weights,
+    ResNet50_Weights,
+    convnext_small,
+    resnet101,
+    resnet50,
+)
 
 from .neck import C2f, ConvBNAct, SPPF
 
-SUPPORTED_BACKBONES = ("resnet50", "resnet101", "yolov8n", "yolov8s", "yolov8m")
+SUPPORTED_BACKBONES = (
+    "resnet50",
+    "resnet101",
+    "yolov8n",
+    "yolov8s",
+    "yolov8m",
+    "convnext_small",
+)
 
 
 def make_divisible(value: float, divisor: int = 8) -> int:
@@ -157,3 +171,58 @@ class ResNet50Backbone(ResNetBackbone):
             pretrained=pretrained,
             freeze_stem=freeze_stem,
         )
+
+
+class ConvNeXtBackbone(nn.Module):
+    """ConvNeXt feature extractor returning strides 4, 8, 16, and 32."""
+
+    strides = (4, 8, 16, 32)
+
+    def __init__(
+        self,
+        name: str = "convnext_small",
+        pretrained: bool = False,
+        freeze_stem: bool = False,
+    ) -> None:
+        super().__init__()
+        name = name.lower()
+        if name == "convnext_small":
+            weights = ConvNeXt_Small_Weights.DEFAULT if pretrained else None
+            model = convnext_small(weights=weights)
+            self.out_channels = (96, 192, 384, 768)
+        else:
+            choices = ", ".join(SUPPORTED_BACKBONES)
+            raise ValueError(f"Unsupported backbone: {name}. Choose one of: {choices}.")
+
+        self.name = name
+
+        self.stem = nn.Sequential(
+            model.features[0],
+            model.features[1],
+        )
+        self.stage2 = nn.Sequential(
+            model.features[2],
+            model.features[3],
+        )
+        self.stage3 = nn.Sequential(
+            model.features[4],
+            model.features[5],
+        )
+        self.stage4 = nn.Sequential(
+            model.features[6],
+            model.features[7],
+        )
+
+        if freeze_stem:
+            for parameter in self.stem.parameters():
+                parameter.requires_grad = False
+
+    def forward(
+        self,
+        x: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        c2 = self.stem(x)
+        c3 = self.stage2(c2)
+        c4 = self.stage3(c3)
+        c5 = self.stage4(c4)
+        return c2, c3, c4, c5
