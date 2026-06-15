@@ -22,16 +22,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image_dir", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--checkpoint", type=Path, default=Path("models/best.pth"))
-    parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--conf_threshold", type=float, default=0.25)
+    
+    try:
+        from config import PredictConfig
+        default_batch_size = PredictConfig.BATCH_SIZE
+        default_conf_threshold = PredictConfig.CONF_THRESHOLD
+        default_class_thresholds = ",".join(f"{k}={v}" for k, v in PredictConfig.CLASS_THRESHOLDS.items())
+        default_nms_threshold = PredictConfig.NMS_THRESHOLD
+        default_max_detections = PredictConfig.MAX_DETECTIONS
+        default_device = PredictConfig.DEVICE
+    except ImportError:
+        default_batch_size = 8
+        default_conf_threshold = 0.25
+        default_class_thresholds = ""
+        default_nms_threshold = 0.45
+        default_max_detections = 100
+        default_device = "auto"
+
+    parser.add_argument("--batch_size", type=int, default=default_batch_size)
+    parser.add_argument("--conf_threshold", type=float, default=default_conf_threshold)
     parser.add_argument(
         "--class_thresholds",
-        default="",
+        default=default_class_thresholds,
         help='Comma-separated per-class thresholds, e.g. "chair=0.15,car=0.20".',
     )
-    parser.add_argument("--nms_threshold", type=float, default=0.45)
-    parser.add_argument("--max_detections", type=int, default=100)
-    parser.add_argument("--device", default="auto", choices=("auto", "cpu", "cuda"))
+    parser.add_argument("--nms_threshold", type=float, default=default_nms_threshold)
+    parser.add_argument("--max_detections", type=int, default=default_max_detections)
+    parser.add_argument("--device", default=default_device, choices=("auto", "cpu", "cuda"))
     return parser.parse_args()
 
 
@@ -48,7 +65,29 @@ def load_model(
     device: torch.device,
 ) -> tuple[YoloLite, list[str], int]:
     if not checkpoint_path.exists():
-        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+        print(f"Checkpoint not found locally at {checkpoint_path}.")
+        download_success = False
+        try:
+            from config import PredictConfig
+            if hasattr(PredictConfig, "HF_REPO_ID"):
+                hf_repo_id = PredictConfig.HF_REPO_ID
+                print(f"Attempting to download from Hugging Face Hub repo: {hf_repo_id}...")
+                import shutil
+                from huggingface_hub import hf_hub_download
+                
+                cached_path = hf_hub_download(repo_id=hf_repo_id, filename=checkpoint_path.name)
+                checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(cached_path, checkpoint_path)
+                print(f"Successfully downloaded and saved model to {checkpoint_path}")
+                download_success = True
+        except ImportError as e:
+            if "huggingface_hub" in str(e):
+                print("huggingface_hub is not installed. Please install it to enable auto-download: pip install huggingface_hub")
+        except Exception as e:
+            print(f"Failed to download model: {e}")
+            
+        if not download_success:
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
     classes = list(checkpoint.get("classes", DEFAULT_CLASSES))

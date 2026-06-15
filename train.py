@@ -35,77 +35,134 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--val_image_dir", required=True, type=Path)
     parser.add_argument("--checkpoint_dir", required=True, type=Path)
 
-    parser.add_argument("--image_size", type=int, default=416)
-    parser.add_argument("--epochs", type=int, default=60)
-    parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--num_workers", type=int, default=0)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--weight_decay", type=float, default=1e-4)
+    try:
+        from config import TrainConfig
+        default_image_size = TrainConfig.IMAGE_SIZE
+        default_epochs = TrainConfig.EPOCHS
+        default_batch_size = TrainConfig.BATCH_SIZE
+        default_num_workers = TrainConfig.NUM_WORKERS
+        default_lr = TrainConfig.LR
+        default_weight_decay = TrainConfig.WEIGHT_DECAY
+        default_reg_max = TrainConfig.REG_MAX
+        default_small_object_max_side = TrainConfig.SMALL_OBJECT_MAX_SIDE
+        default_medium_object_max_side = TrainConfig.MEDIUM_OBJECT_MAX_SIDE
+        default_tal_topk = TrainConfig.TAL_TOPK
+        default_tal_alpha = TrainConfig.TAL_ALPHA
+        default_tal_beta = TrainConfig.TAL_BETA
+        default_backbone = TrainConfig.BACKBONE_NAME
+        default_neck = TrainConfig.NECK_NAME
+        default_oversample_classes = TrainConfig.OVERSAMPLE_CLASSES
+        default_oversample_factor = TrainConfig.OVERSAMPLE_FACTOR
+        default_pretrained_backbone = TrainConfig.USE_PRETRAINED_BACKBONE
+        default_freeze_backbone_stem = TrainConfig.FREEZE_BACKBONE_STEM
+        default_amp = TrainConfig.USE_AMP
+        default_disable_tqdm = TrainConfig.DISABLE_TQDM
+        default_max_train_batches = TrainConfig.MAX_TRAIN_BATCHES
+        default_max_val_batches = TrainConfig.MAX_VAL_BATCHES
+        default_conf_threshold = TrainConfig.CONF_THRESHOLD
+        default_class_thresholds = ",".join(f"{k}={v}" for k, v in TrainConfig.CLASS_THRESHOLDS.items())
+        default_nms_threshold = TrainConfig.NMS_THRESHOLD
+        default_max_detections = TrainConfig.MAX_DETECTIONS
+    except ImportError:
+        default_image_size = 416
+        default_epochs = 60
+        default_batch_size = 8
+        default_num_workers = 0
+        default_lr = 1e-3
+        default_weight_decay = 1e-4
+        default_reg_max = 16
+        default_small_object_max_side = 96.0
+        default_medium_object_max_side = 224.0
+        default_tal_topk = 5
+        default_tal_alpha = 0.5
+        default_tal_beta = 4.0
+        default_backbone = "resnet50"
+        default_neck = "yolov8_pan"
+        default_oversample_classes = []
+        default_oversample_factor = 1.0
+        default_pretrained_backbone = False
+        default_freeze_backbone_stem = False
+        default_amp = False
+        default_disable_tqdm = False
+        default_max_train_batches = 0
+        default_max_val_batches = 0
+        default_conf_threshold = 0.25
+        default_class_thresholds = ""
+        default_nms_threshold = 0.45
+        default_max_detections = 100
+
+    parser.add_argument("--image_size", type=int, default=default_image_size)
+    parser.add_argument("--epochs", type=int, default=default_epochs)
+    parser.add_argument("--batch_size", type=int, default=default_batch_size)
+    parser.add_argument("--num_workers", type=int, default=default_num_workers)
+    parser.add_argument("--lr", type=float, default=default_lr)
+    parser.add_argument("--weight_decay", type=float, default=default_weight_decay)
     parser.add_argument("--warmup_epochs", type=int, default=3)
     parser.add_argument("--grad_clip", type=float, default=10.0)
-    parser.add_argument("--reg_max", type=int, default=16)
+    parser.add_argument("--reg_max", type=int, default=default_reg_max)
     parser.add_argument(
         "--small_object_max_side",
         type=float,
-        default=96.0,
+        default=default_small_object_max_side,
         help="Max resized box side assigned to the finest detection scale.",
     )
     parser.add_argument(
         "--medium_object_max_side",
         type=float,
-        default=224.0,
+        default=default_medium_object_max_side,
         help="Max resized box side assigned to the middle detection scale.",
     )
     parser.add_argument(
         "--tal_topk",
         type=int,
-        default=5,
+        default=default_tal_topk,
         help="Top-k candidates per ground-truth box for task-aligned assignment.",
     )
     parser.add_argument(
         "--tal_alpha",
         type=float,
-        default=0.5,
+        default=default_tal_alpha,
         help="Classification-score exponent for task-aligned assignment.",
     )
     parser.add_argument(
         "--tal_beta",
         type=float,
-        default=4.0,
+        default=default_tal_beta,
         help="IoU exponent for task-aligned assignment.",
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--oversample_classes",
         nargs="*",
-        default=[],
+        default=default_oversample_classes,
         help="Class names whose images should be sampled more often during training.",
     )
     parser.add_argument(
         "--oversample_factor",
         type=float,
-        default=1.0,
+        default=default_oversample_factor,
         help="Sampling weight for images containing oversample_classes. Use 1.0 to disable.",
     )
 
-    parser.add_argument("--pretrained_backbone", action="store_true")
-    parser.add_argument("--freeze_backbone_stem", action="store_true")
+    parser.add_argument("--pretrained_backbone", action="store_true", default=default_pretrained_backbone)
+    parser.add_argument("--freeze_backbone_stem", action="store_true", default=default_freeze_backbone_stem)
     parser.add_argument(
         "--backbone",
-        default="resnet50",
+        default=default_backbone,
         choices=SUPPORTED_BACKBONES,
         help="Feature extractor backbone.",
     )
     parser.add_argument(
         "--neck",
-        default="yolov8_pan",
+        default=default_neck,
         choices=SUPPORTED_NECKS,
         help="Feature pyramid neck.",
     )
-    parser.add_argument("--amp", action="store_true")
+    parser.add_argument("--amp", action="store_true", default=default_amp)
     parser.add_argument(
         "--disable_tqdm",
         action="store_true",
+        default=default_disable_tqdm,
         help="Disable tqdm progress bars and print only one summary line per epoch.",
     )
     parser.add_argument(
@@ -114,24 +171,24 @@ def parse_args() -> argparse.Namespace:
         help="Alias for --disable_tqdm.",
     )
 
-    parser.add_argument("--conf_threshold", type=float, default=0.25)
+    parser.add_argument("--conf_threshold", type=float, default=default_conf_threshold)
     parser.add_argument(
         "--class_thresholds",
-        default="",
+        default=default_class_thresholds,
         help='Comma-separated per-class thresholds for validation, e.g. "chair=0.15,car=0.20".',
     )
-    parser.add_argument("--nms_threshold", type=float, default=0.45)
-    parser.add_argument("--max_detections", type=int, default=100)
+    parser.add_argument("--nms_threshold", type=float, default=default_nms_threshold)
+    parser.add_argument("--max_detections", type=int, default=default_max_detections)
     parser.add_argument(
         "--max_val_batches",
         type=int,
-        default=0,
+        default=default_max_val_batches,
         help="Use 0 for full validation; useful for quick smoke tests.",
     )
     parser.add_argument(
         "--max_train_batches",
         type=int,
-        default=0,
+        default=default_max_train_batches,
         help="Use 0 for full training; useful for quick smoke tests.",
     )
     return parser.parse_args()

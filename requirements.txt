@@ -6,3 +6,4 @@ tqdm
 pandas
 ipykernel
 matplotlib
+huggingface_hub
